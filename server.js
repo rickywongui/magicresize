@@ -186,4 +186,21 @@ app.post('/api/release-device', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.status(200).send(`
+    <h1>Magic Resizer License Server</h1>
+    <p>✅ Server is running</p>
+    <p>Available endpoints:</p>
+    <ul>
+      <li>POST /api/verify</li>
+      <li>GET /api/keys</li>
+      <li>POST /api/keys</li>
+      <li>PATCH /api/keys</li>
+      <li>DELETE /api/keys</li>
+      <li>POST /api/release-device</li>
+    </ul>
+  `);
+});
+
 app.listen(PORT, () => console.log(`License server running on port ${PORT}`));
