@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: magic-resizer-license
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ADMIN_SECRET
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: magic-resizer-redis
+          property: connectionString
+
+keyvalue:
+  - name: magic-resizer-redis
+    plan: free
