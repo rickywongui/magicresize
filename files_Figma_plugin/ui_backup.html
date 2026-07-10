@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Banner Resizer</title>
+    <style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #1a1a1a; --surface: #242424; --border: #333;
+    --accent: #7c5cfc; --accent2: #a78bfa;
+    --success: #34d399; --error: #f87171;
+    --text: #f0f0f0; --muted: #888; --radius: 8px;
+  }
+  body { font-family: "Inter", -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5; padding: 16px; }
+
+  .header { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
+  .header-icon { width: 28px; height: 28px; background: linear-gradient(135deg, var(--accent), var(--accent2)); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+  .header-title { font-size: 15px; font-weight: 600; }
+  .header-sub { font-size: 11px; color: var(--muted); margin-top: 1px; }
+
+  .sel-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 14px; }
+  .sel-card.ok { border-color: #2a5a3a; }
+  .card-row { display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.ok { background: var(--success); }
+  .card-name { font-weight: 500; font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-size { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .card-sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  .variants-wrap { margin-top: 8px; }
+  .variants-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+  .variants-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .vchip { font-size: 10px; padding: 2px 7px; border-radius: 10px; background: var(--bg); border: 1px solid var(--border); color: var(--muted); }
+  .vchip.match { border-color: var(--accent); color: var(--accent2); background: rgba(124,92,252,.12); font-weight: 600; }
+
+  .template-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 10px; }
+  .template-select-wrap { display: flex; align-items: center; gap: 6px; flex: 1; }
+  select { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 12px; padding: 6px 10px; outline: none; cursor: pointer; }
+  select:focus { border-color: var(--accent); }
+  #refreshTemplates { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--muted); font-size: 14px; width: 28px; height: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  #refreshTemplates:hover { border-color: var(--accent); color: var(--accent2); }
+
+  /* Mode tabs */
+  .tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+  .tab { flex: 1; padding: 6px; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; border: 1px solid var(--border); background: var(--surface); color: var(--muted); text-align: center; }
+  .tab.active { background: rgba(124,92,252,.15); border-color: var(--accent); color: var(--accent2); }
+
+  .size-form { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin-bottom: 14px; }
+  .dimension-row { display: grid; grid-template-columns: 1fr 20px 1fr; align-items: end; gap: 0; margin-bottom: 10px; }
+  .dim-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .dim-sep { text-align: center; color: var(--muted); font-size: 16px; padding-bottom: 7px; }
+  input[type="number"], input[type="text"], textarea {
+    width: 100%; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-size: 13px;
+    padding: 7px 10px; outline: none; font-family: inherit;
+  }
+  input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; }
+  input:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 120px; line-height: 1.6; -moz-appearance: textfield; }
+  .ratio-hint { font-size: 11px; color: var(--accent2); margin-top: 6px; min-height: 16px; }
+  .batch-hint { font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .batch-hint span { color: var(--accent2); }
+  .batch-count { font-size: 11px; color: var(--success); margin-top: 4px; }
+
+  .btn { width: 100%; padding: 9px 14px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; transition: all .15s; display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .btn-primary { background: linear-gradient(135deg, var(--accent), #9b7dff); color: #fff; }
+  .btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
+  .btn-primary:disabled { opacity: .4; cursor: not-allowed; }
+
+  .status { margin-top: 12px; border-radius: 6px; padding: 8px 12px; font-size: 12px; display: none; }
+  .status.success { background: rgba(52,211,153,.12); color: var(--success); display: block; }
+  .status.error   { background: rgba(248,113,113,.12); color: var(--error);   display: block; }
+  .status.loading { background: rgba(124,92,252,.1);   color: var(--accent2); display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spinner { width: 12px; height: 12px; border: 2px solid transparent; border-top-color: currentColor; border-radius: 50%; animation: spin .7s linear infinite; display: inline-block; }
+  .progress-bar-wrap { margin-top: 8px; background: var(--border); border-radius: 4px; height: 4px; display: none; overflow: hidden; }
+  .progress-bar-wrap.visible { display: block; }
+  .progress-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); border-radius: 4px; transition: width .3s ease; width: 0%; }
+  .progress-label { font-size: 11px; color: var(--accent2); margin-top: 4px; display: none; }
+  .progress-label.visible { display: block; }
+  .upload-btn { display: block; padding: 8px 12px; border: 1px dashed var(--border); border-radius: 6px; color: var(--muted); font-size: 12px; cursor: pointer; text-align: center; }
+  .upload-btn:hover { border-color: var(--accent); color: var(--accent2); }
+  .upload-status { font-size: 11px; color: var(--success); margin-top: 6px; min-height: 16px; }
+  .lang-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lang-list { display: flex; flex-wrap: wrap; gap: 6px; }
+  .lang-chip { display: flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--border); border-radius: 10px; font-size: 11px; cursor: pointer; background: var(--bg); color: var(--muted); }
+  .lang-chip:has(input:checked) { border-color: var(--accent); color: var(--accent2); background: rgba(124,92,252,.12); }
+  .mapping-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+  .map-row { display: flex; align-items: center; gap: 6px; }
+  .map-field { font-size: 11px; color: var(--muted); width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .map-btn { flex: 1; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 11px; background: var(--bg); color: var(--muted); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+  .map-btn.mapped { border-color: var(--success); color: var(--success); }
+  .map-btn.selecting { border-color: var(--accent); color: var(--accent2); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  .progress { font-size: 11px; color: var(--accent2); margin-top: 4px; }
+</style>
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script
+      src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  </head>
+  <body>
+
+    <div class="header">
+      <div class="header-icon">🎨</div>
+      <div>
+        <div class="header-title">Banner Resizer</div>
+        <div class="header-sub">Select your banner frame, then enter sizes</div>
+      </div>
+    </div>
+
+    <!-- Template selector — only shown if templates exist on the page -->
+    <div class="template-row" id="templateRow" style="display:none">
+      <div class="section-label" style="margin-bottom:0">Template</div>
+      <div class="template-select-wrap">
+        <select id="templateSelect">
+          <option value>— Select a template —</option>
+        </select>
+        <button id="refreshTemplates" title="Refresh templates">↺</button>
+      </div>
+    </div>
+
+    <!-- Selection card -->
+    <div class="sel-card" id="selCard">
+      <div class="card-row">
+        <div class="dot" id="selDot"></div>
+        <div class="card-name" id="selName">← Select a frame on the canvas</div>
+        <div class="card-size" id="selSize"></div>
+      </div>
+      <div class="card-sub" id="selSub"></div>
+      <div class="variants-wrap" id="variantsWrap" style="display:none">
+        <div class="variants-label">Component Set variants</div>
+        <div class="variants-list" id="variantsList"></div>
+      </div>
+    </div>
+
+    <!-- Mode tabs -->
+    <div class="tabs">
+      <div class="tab active" id="tabSingle">Single</div>
+      <div class="tab" id="tabBatch">Batch</div>
+      <div class="tab" id="tabTranslate">Translate</div>
+      <div class="tab" id="tabExport">Export</div>
+    </div>
+
+    <!-- Single mode -->
+    <div id="modeSingle">
+      <div class="size-form">
+        <div class="dimension-row">
+          <div>
+            <div class="dim-label">Width (px)</div>
+            <input type="number" id="widthInput" placeholder="e.g. 700"
+              min="1" />
+          </div>
+          <div class="dim-sep">×</div>
+          <div>
+            <div class="dim-label">Height (px)</div>
+            <input type="number" id="heightInput" placeholder="e.g. 1200"
+              min="1" />
+          </div>
+        </div>
+        <div class="ratio-hint" id="ratioHint"></div>
+        <div style="margin-top:10px">
+          <div class="dim-label">Frame label (optional)</div>
+          <input type="text" id="labelInput" placeholder="e.g. Mobile Story" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Batch mode -->
+    <div id="modeBatch" style="display:none">
+      <div class="size-form">
+        <div class="dim-label" style="margin-bottom:6px">Paste sizes — one per
+          line</div>
+        <textarea id="batchInput"
+          placeholder="Pierre Jeannin&#9;16012&#9;AUBERT&#9;1100&#9;400&#10;&#9;&#9;&#9;1360&#9;600&#10;&#9;&#9;&#9;1170&#9;130&#10;&#10;Or simple sizes:&#10;1080x1920&#10;300x600"></textarea>
+        <div class="batch-hint">First row text columns become the name prefix:
+          <span>Pierre_Jeannin_16012_AUBERT_1100x400</span></div>
+        <div class="batch-count" id="batchCount"></div>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+          <div class="dim-label" style="margin:0;white-space:nowrap">Banners per
+            row</div>
+          <input type="number" id="bannersPerRow" value="5" min="1" max="20"
+            style="width:60px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:13px;text-align:center" />
+        </div>
+      </div>
+    </div>
+
+    <!-- Export mode -->
+    <div id="modeExport" style="display:none">
+      <div class="size-form" style="margin-bottom:10px">
+        <div class="dim-label" style="margin-bottom:8px">Export scope</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label
+            style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+            <input type="radio" name="exportScope" value="selected"
+              id="exportSelected" checked />
+            <span>Selected frames only</span>
+          </label>
+          <label
+            style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+            <input type="radio" name="exportScope" value="all" id="exportAll" />
+            <span>All banners — by language page</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Language list — shown when "All banners" is selected -->
+      <div id="exportLangSection" style="display:none;margin-bottom:10px">
+        <div class="size-form">
+          <div class="dim-label" style="margin-bottom:6px">Select languages to
+            export</div>
+          <div class="lang-row">
+            <label class="lang-chip" id="exportLangAll">
+              <input type="checkbox" id="exportCheckAll" checked /> All
+            </label>
+          </div>
+          <div class="lang-list" id="exportLangList"
+            style="margin-top:6px"></div>
+          <div style="font-size:10px;color:var(--muted);margin-top:4px">Frames
+            with <code>local_master</code> in the name are skipped</div>
+        </div>
+      </div>
+
+      <div class="size-form" style="margin-bottom:10px">
+        <div class="dim-label" style="margin-bottom:8px">Format</div>
+        <div style="display:flex;gap:8px">
+          <label class="lang-chip"><input type="radio" name="exportFormat"
+              value="PNG" id="fmtPNG" checked /> PNG</label>
+          <label class="lang-chip"><input type="radio" name="exportFormat"
+              value="JPG" id="fmtJPG" /> JPG</label>
+          <label class="lang-chip"><input type="radio" name="exportFormat"
+              value="PDF" id="fmtPDF" /> PDF</label>
+        </div>
+      </div>
+
+      <div class="size-form" style="margin-bottom:10px" id="scaleRow">
+        <div style="display:flex;align-items:center;gap:8px">
+          <div class="dim-label" style="margin:0;white-space:nowrap">Scale</div>
+          <select id="exportScale"
+            style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:12px">
+            <option value="1">1× (actual size)</option>
+            <option value="2">2× (retina)</option>
+            <option value="0.5">0.5×</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="compressRow" class="size-form"
+        style="margin-bottom:6px;display:none">
+        <label
+          style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
+          <input type="checkbox" id="compressBelow150"
+            style="width:14px;height:14px" />
+          Compress images below 150kb
+        </label>
+        <div
+          style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
+          Re-encodes as JPEG, reducing quality until &lt; 150kb. Best for web
+          use.
+        </div>
+      </div>
+
+      <div class="export-info" id="exportInfo"
+        style="font-size:11px;color:var(--muted);min-height:16px;margin-bottom:4px"></div>
+
+      <!-- Export log -->
+      <div id="exportLog"
+        style="display:none;max-height:120px;overflow-y:auto;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:10px;color:var(--muted);font-family:monospace;margin-top:6px"></div>
+    </div>
+
+    <!-- Translate mode -->
+    <div id="modeTranslate" style="display:none">
+      <div class="size-form" style="margin-bottom:10px">
+        <div class="dim-label" style="margin-bottom:6px">1. Upload translation
+          Excel file</div>
+        <label class="upload-btn" id="uploadLabel">
+          📂 Choose Excel file (.xlsx)
+          <input type="file" id="xlsxInput" accept=".xlsx"
+            style="display:none" />
+        </label>
+        <div class="upload-status" id="uploadStatus"></div>
+      </div>
+
+      <!-- Optional masterfile upload -->
+      <div class="size-form" style="margin-bottom:10px">
+        <div class="dim-label" style="margin-bottom:6px">2. (Optional) Upload
+          masterfile
+          <span style="color:var(--muted);font-weight:400"> — controls which
+            sizes per language</span></div>
+        <label class="upload-btn" id="masterfileLabel">
+          📂 Choose Masterfile Excel (.xlsx)
+          <input type="file" id="masterfileInput" accept=".xlsx"
+            style="display:none" />
+        </label>
+        <div class="upload-status" id="masterfileStatus"></div>
+      </div>
+
+      <div id="translateConfig" style="display:none">
+        <!-- Language selection -->
+        <div class="size-form" style="margin-bottom:10px">
+          <div class="dim-label" style="margin-bottom:6px">3. Select
+            languages</div>
+          <div class="lang-row">
+            <label class="lang-chip" id="langAll">
+              <input type="checkbox" id="checkAll" /> All
+            </label>
+          </div>
+          <div class="lang-list" id="langList"></div>
+          <div id="translateBannerCount"
+            style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+        </div>
+
+        <!-- Text mapping -->
+        <div class="size-form" style="margin-bottom:10px">
+          <div class="dim-label" style="margin-bottom:6px">3. Map text layers —
+            select a layer on canvas, then click a field to connect</div>
+          <div class="mapping-list" id="mappingList"></div>
+        </div>
+      </div>
+    </div>
+
+    <button class="btn btn-primary" id="createBtn" disabled>
+      <span id="btnLabel">Create banner</span>
+    </button>
+    <div class="status" id="status"></div>
+    <div class="progress-bar-wrap" id="progressBarWrap">
+      <div class="progress-bar-fill" id="progressBarFill"></div>
+    </div>
+    <div class="progress-label" id="progressEl"></div>
+
+    <script>
+  var par = window.parent;
+  var selFound = false;
+  var variants = [];
+  var mode = 'single';
+
+  // Translate state
+  var translationData = null;   // { languages: ['EN','DE',...], columns: [...], rows: {EN:{col:val,...},...} }
+  var masterfileData = null;    // { langMap: { 'DE': [{w,h},...], 'FR': [{w,h},...] } } or null if not uploaded
+  var mappings = {};            // { columnName: { layerId, layerName } }
+  var selectingField = null;    // column name being mapped
+  var currentLayerId = null;
+  var currentLayerName = null;
+
+  var selCard      = document.getElementById('selCard');
+  var selDot       = document.getElementById('selDot');
+  var selName      = document.getElementById('selName');
+  var selSize      = document.getElementById('selSize');
+  var selSub       = document.getElementById('selSub');
+  var variantsWrap = document.getElementById('variantsWrap');
+  var variantsList = document.getElementById('variantsList');
+  var widthInput   = document.getElementById('widthInput');
+  var heightInput  = document.getElementById('heightInput');
+  var labelInput   = document.getElementById('labelInput');
+  var ratioHint    = document.getElementById('ratioHint');
+  var batchInput   = document.getElementById('batchInput');
+  var batchCount   = document.getElementById('batchCount');
+  var createBtn    = document.getElementById('createBtn');
+  var btnLabel     = document.getElementById('btnLabel');
+  var statusEl     = document.getElementById('status');
+  var progressEl   = document.getElementById('progressEl');
+  var progressBarWrap = document.getElementById('progressBarWrap');
+  var progressBarFill = document.getElementById('progressBarFill');
+
+  function setProgress(done, total, label) {
+    if (total > 0) {
+      var pct = Math.round(done / total * 100);
+      progressBarWrap.className = 'progress-bar-wrap visible';
+      progressBarFill.style.width = pct + '%';
+      progressEl.className = 'progress-label visible';
+      progressEl.textContent = label || (done + '/' + total);
+    } else {
+      progressBarWrap.className = 'progress-bar-wrap';
+      progressEl.className = 'progress-label';
+      progressEl.textContent = '';
+    }
+  }
+  var tabSingle    = document.getElementById('tabSingle');
+  var tabBatch     = document.getElementById('tabBatch');
+  var tabTranslate = document.getElementById('tabTranslate');
+  var modeSingle   = document.getElementById('modeSingle');
+  var modeBatch    = document.getElementById('modeBatch');
+  var modeTranslate = document.getElementById('modeTranslate');
+
+  var templateSelect   = document.getElementById('templateSelect');
+  var refreshTemplates = document.getElementById('refreshTemplates');
+  var templateRow      = document.getElementById('templateRow');
+
+  // Load templates on open
+  par.postMessage({ pluginMessage: { type: 'GET_TEMPLATES' } }, '*');
+  par.postMessage({ pluginMessage: { type: 'GET_MASTER_INFO' } }, '*');
+
+  // Refresh button
+  refreshTemplates.addEventListener('click', function() {
+    templateSelect.innerHTML = '<option value="">— Loading… —</option>';
+    par.postMessage({ pluginMessage: { type: 'GET_TEMPLATES' } }, '*');
+  });
+
+  // Template selected
+  templateSelect.addEventListener('change', function() {
+    var idx = templateSelect.selectedIndex;
+    if (idx <= 0) return;
+    var opt = templateSelect.options[idx];
+    par.postMessage({ pluginMessage: {
+      type: 'SELECT_TEMPLATE',
+      id: opt.value,
+      variantName: opt.dataset.variantName || null,
+      variantRawName: opt.dataset.variantRawName || null,
+    }}, '*');
+    templateSelect.options[0].textContent = '✓ ' + opt.textContent;
+    templateSelect.selectedIndex = 0;
+  });
+
+  // ── Tabs ──
+  tabSingle.addEventListener('click', function() {
+    mode = 'single';
+    tabSingle.className = 'tab active'; tabBatch.className = 'tab'; tabTranslate.className = 'tab'; tabExport.className = 'tab';
+    modeSingle.style.display = 'block'; modeBatch.style.display = 'none'; modeTranslate.style.display = 'none'; modeExport.style.display = 'none';
+    createBtn.style.display = 'block'; updateBtn();
+  });
+  tabBatch.addEventListener('click', function() {
+    mode = 'batch';
+    tabBatch.className = 'tab active'; tabSingle.className = 'tab'; tabTranslate.className = 'tab'; tabExport.className = 'tab';
+    modeBatch.style.display = 'block'; modeSingle.style.display = 'none'; modeTranslate.style.display = 'none'; modeExport.style.display = 'none';
+    createBtn.style.display = 'block'; parseBatch(); updateBtn();
+  });
+  var tabExport    = document.getElementById('tabExport');
+  var modeExport   = document.getElementById('modeExport');
+  var exportInfo   = document.getElementById('exportInfo');
+  var exportLangSection = document.getElementById('exportLangSection');
+  var exportLangList    = document.getElementById('exportLangList');
+  var exportCheckAll    = document.getElementById('exportCheckAll');
+  var exportLog         = document.getElementById('exportLog');
+
+  function addExportLog(msg) {
+    exportLog.style.display = 'block';
+    var line = document.createElement('div');
+    line.textContent = msg;
+    exportLog.appendChild(line);
+    exportLog.scrollTop = exportLog.scrollHeight;
+  }
+
+  tabExport.addEventListener('click', function() {
+    mode = 'export';
+    tabExport.className = 'tab active';
+    tabSingle.className = 'tab'; tabBatch.className = 'tab'; tabTranslate.className = 'tab';
+    modeExport.style.display = 'block';
+    modeSingle.style.display = 'none'; modeBatch.style.display = 'none'; modeTranslate.style.display = 'none';
+    createBtn.style.display = 'block';
+    btnLabel.textContent = 'Export';
+    createBtn.disabled = false;
+    exportLog.innerHTML = ''; exportLog.style.display = 'none';
+    updateExportInfo();
+    // Request page list from plugin
+    par.postMessage({ pluginMessage: { type: 'GET_PAGES' } }, '*');
+  });
+
+  // Show/hide compress option based on format selection
+  document.querySelectorAll('input[name=exportFormat]').forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      var compressRow = document.getElementById('compressRow');
+      var compressChk = document.getElementById('compressBelow150');
+      if (compressRow) {
+        var isJPG = this.value === 'JPG';
+        compressRow.style.display = isJPG ? '' : 'none';
+        if (!isJPG && compressChk) compressChk.checked = false;
+      }
+    });
+  });
+
+  document.querySelectorAll('input[name=exportFormat]').forEach(function(radio) {
+    radio.addEventListener('change', function() {
+      var compressRow = document.getElementById('compressRow');
+      var compressChk = document.getElementById('compressBelow150');
+      if (compressRow) {
+        var isJPG = this.value === 'JPG';
+        compressRow.style.display = isJPG ? '' : 'none';
+        if (!isJPG && compressChk) compressChk.checked = false;
+      }
+    });
+  });
+
+  document.getElementById('exportSelected').addEventListener('change', function() {
+    exportLangSection.style.display = 'none';
+    updateExportInfo();
+  });
+  document.getElementById('exportAll').addEventListener('change', function() {
+    exportLangSection.style.display = 'block';
+    updateExportInfo();
+    // Re-fetch pages in case they weren't loaded yet
+    par.postMessage({ pluginMessage: { type: 'GET_PAGES' } }, '*');
+  });
+
+  exportCheckAll.addEventListener('change', function() {
+    exportLangList.querySelectorAll('input[type=checkbox]').forEach(function(cb) {
+      cb.checked = exportCheckAll.checked;
+    });
+  });
+
+  function getSelectedExportLangs() {
+    var langs = [];
+    exportLangList.querySelectorAll('input[type=checkbox]:checked').forEach(function(cb) {
+      langs.push(cb.value);
+    });
+    return langs;
+  }
+
+  function updateExportInfo() {
+    var scope = document.querySelector('input[name=exportScope]:checked').value;
+    exportInfo.textContent = scope === 'selected'
+      ? 'Will export currently selected frames'
+      : 'Will export selected language pages — master frames skipped';
+  }
+  var xlsxInput = document.getElementById('xlsxInput');
+  var uploadStatus = document.getElementById('uploadStatus');
+  var translateConfig = document.getElementById('translateConfig');
+  var langList = document.getElementById('langList');
+  var checkAll = document.getElementById('checkAll');
+  var mappingList = document.getElementById('mappingList');
+
+  tabTranslate.addEventListener('click', function() {
+    mode = 'translate';
+    tabTranslate.className = 'tab active';
+    tabSingle.className = 'tab'; tabBatch.className = 'tab'; tabExport.className = 'tab';
+    modeTranslate.style.display = 'block';
+    modeSingle.style.display = 'none'; modeBatch.style.display = 'none'; modeExport.style.display = 'none';
+    createBtn.style.display = 'block';
+    btnLabel.textContent = 'Translate banners';
+    createBtn.disabled = !canTranslate();
+  });
+
+  // ── Excel upload ──
+  // Masterfile input
+  var masterfileInput = document.getElementById('masterfileInput');
+  var masterfileStatus = document.getElementById('masterfileStatus');
+  masterfileInput.addEventListener('change', function() {
+    var file = masterfileInput.files[0];
+    if (!file) return;
+    masterfileStatus.textContent = 'Reading…';
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, { type: 'array' });
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+        parseMasterfile(rows);
+      } catch(err) {
+        masterfileStatus.textContent = 'Error: ' + err.message;
+        masterfileStatus.style.color = 'var(--error, red)';
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  function parseMasterfile(rows) {
+    if (!rows || rows.length < 2) { masterfileStatus.textContent = 'No data'; return; }
+
+    // Find header row — contains WIDTH and HEIGHT columns
+    var headerRow = -1;
+    var langCols = [];
+    for (var r = 0; r < Math.min(5, rows.length); r++) {
+      var row = rows[r];
+      for (var c = 0; c < row.length; c++) {
+        var cell = String(row[c] || '').trim().toUpperCase();
+        if (cell === 'WIDTH' || cell === 'HEIGHT') { headerRow = r; break; }
+      }
+      if (headerRow >= 0) break;
+    }
+    if (headerRow < 0) { masterfileStatus.textContent = 'Could not find WIDTH/HEIGHT columns'; return; }
+
+    var hdr = rows[headerRow];
+    var widthCol = -1, heightCol = -1, accountCol = -1;
+
+    // Full language name → 2-letter code
+    var langNameMap = {
+      'DANISH':'DA','NORVEGIAN':'NO','NORWEGIAN':'NO','SWEDISH':'SE','FINNISH':'FI',
+      'DUTCH':'NL','GERMAN':'DE','ITALIAN':'IT','PORTUGUESE':'PT',
+      'FRENCH':'FR','ENGLISH':'EN','SPANISH':'ES','GREEK':'EL',
+      'POLISH':'PL','CZECH':'CS','HUNGARIAN':'HU','ROMANIAN':'RO'
+    };
+
+    for (var c = 0; c < hdr.length; c++) {
+      var h = String(hdr[c] || '').trim().toUpperCase();
+      if (h === 'WIDTH') widthCol = c;
+      else if (h === 'HEIGHT') heightCol = c;
+      else if (h === 'ACCOUNT NAME' || h === 'ACCOUNT' || h === 'RETAILER' || h === 'CLIENT' || h === 'RETAILER NAME') accountCol = c;
+      else if (langNameMap[h]) langCols.push({ name: h, col: c, code: langNameMap[h] });
+    }
+
+    // Fallback: account column is the one just before WIDTH
+    if (accountCol < 0 && widthCol > 0) accountCol = widthCol - 1;
+    if (widthCol < 0 || heightCol < 0) { masterfileStatus.textContent = 'WIDTH/HEIGHT columns not found'; return; }
+
+    console.log('[masterfile] accountCol=' + accountCol + ' widthCol=' + widthCol + ' heightCol=' + heightCol);
+
+    // Build langMap: { 'FR': [{w,h,retailer},...], ... }
+    var langMap = {};
+    for (var li = 0; li < langCols.length; li++) langMap[langCols[li].code] = [];
+
+    var lastRetailer = '';
+    for (var r = headerRow + 1; r < rows.length; r++) {
+      var row = rows[r];
+      // Update retailer from account column — persists across rows (merged cells)
+      if (accountCol >= 0) {
+        var cellVal = String(row[accountCol] || '').trim();
+        if (cellVal && cellVal !== '0') lastRetailer = cellVal;
+      }
+      var w = parseInt(row[widthCol], 10);
+      var h = parseInt(row[heightCol], 10);
+      if (!w || !h) continue;
+      for (var li = 0; li < langCols.length; li++) {
+        var val = String(row[langCols[li].col] || '').trim().toUpperCase();
+        if (val === 'X') {
+          langMap[langCols[li].code].push({ w: w, h: h, retailer: lastRetailer });
+          console.log('[masterfile] ' + langCols[li].code + ': ' + lastRetailer + ' ' + w + 'x' + h);
+        }
+      }
+    }
+
+    // Count & report
+    var total = 0;
+    var langs = [];
+    for (var code in langMap) {
+      if (langMap[code].length > 0) { total += langMap[code].length; langs.push(code); }
+    }
+
+    masterfileData = { langMap: langMap };
+    masterfileStatus.textContent = '✓ ' + langs.length + ' languages, ' + total + ' size+retailer rules loaded';
+    masterfileStatus.style.color = 'var(--success)';
+    console.log('[masterfile] done: ' + langs.join(', ') + ', total=' + total);
+  }
+
+  xlsxInput.addEventListener('change', function() {
+    var file = xlsxInput.files[0];
+    if (!file) return;
+
+    // Reset all state
+    translationData = null;
+    mappings = {};
+    selectingField = null;
+    langList.innerHTML = '';
+    mappingList.innerHTML = '';
+    translateConfig.style.display = 'none';
+    checkAll.checked = false;
+    uploadStatus.textContent = 'Reading…';
+    uploadStatus.style.color = 'var(--muted)';
+    createBtn.disabled = true;
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = new Uint8Array(e.target.result);
+        var wb = XLSX.read(data, { type: 'array' });
+        // Only use the first sheet
+        var ws = wb.Sheets[wb.SheetNames[0]];
+        var rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+        // Only use first row as headers, rest as data
+        parseTranslationData(rows);
+      } catch(err) {
+        uploadStatus.textContent = 'Error: ' + err.message;
+        uploadStatus.style.color = 'var(--error)';
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+
+  function parseTranslationData(rows) {
+    if (!rows || rows.length < 2) { uploadStatus.textContent = 'No data found'; return; }
+
+    var langCodeRegex = /^[A-Z]{2}$/;
+    var headers = rows[0].map(function(h) { return h ? String(h).trim() : ''; });
+
+    // Auto-detect format:
+    // Format A (old): col[0] = empty/label, col[1+] = column names, rows have lang code in col[0]
+    //   Header: ["", "Field1", "Field2", ...]
+    //   Rows:   ["EN", "text1", "text2", ...], ["DE", ...]
+    // Format B (new): col[0+] = language codes, rows have EN text in col[0], translations in col[1+]
+    //   Header: ["EN", "FR", "DE", ...]
+    //   Rows:   ["English text", "French text", "German text", ...]
+    var isFormatB = headers.length >= 2 && langCodeRegex.test(headers[0]) && langCodeRegex.test(headers[1]);
+
+    var languages = [];
+    var langData = {};
+    var enData = {};
+    var columns = [];
+
+    if (isFormatB) {
+      // Format B: headers are lang codes, rows are translations
+      // EN column (col 0) text = the "key" (source text for matching)
+      var langCodes = [];
+      for (var h = 0; h < headers.length; h++) {
+        if (headers[h] && langCodeRegex.test(headers[h])) {
+          langCodes.push({ lang: headers[h], col: h });
+          if (headers[h] !== 'EN' && languages.indexOf(headers[h]) === -1) {
+            languages.push(headers[h]);
+          }
+        }
+      }
+      // Find EN column index
+      var enColIdx = 0;
+      for (var h = 0; h < langCodes.length; h++) {
+        if (langCodes[h].lang === 'EN') { enColIdx = langCodes[h].col; break; }
+      }
+
+      // Init lang data
+      for (var li = 0; li < languages.length; li++) langData[languages[li]] = {};
+
+      // Each data row: col[enColIdx] = EN text (key), other cols = translations
+      for (var r = 1; r < rows.length; r++) {
+        var row = rows[r];
+        if (!row || !row[enColIdx]) continue;
+        var enText = String(row[enColIdx]).trim();
+        if (!enText) continue;
+        columns.push(enText); // EN text is both the column name and the key
+        enData[enText] = enText;
+        for (var li = 0; li < languages.length; li++) {
+          var lang = languages[li];
+          var colIdx = null;
+          for (var h = 0; h < langCodes.length; h++) {
+            if (langCodes[h].lang === lang) { colIdx = langCodes[h].col; break; }
+          }
+          var translated = (colIdx !== null && row[colIdx]) ? String(row[colIdx]).trim() : enText;
+          langData[lang][enText] = translated;
+        }
+      }
+      // Add EN itself so mappings work
+      if (languages.indexOf('EN') === -1) languages.unshift('EN');
+      langData['EN'] = enData;
+
+    } else {
+      // Format A (original): col[0] = label, col[1+] = column names
+      for (var h = 1; h < headers.length; h++) {
+        if (headers[h]) columns.push(headers[h]);
+      }
+      var enRow = rows[1] || [];
+      for (var c = 0; c < columns.length; c++) {
+        enData[columns[c]] = enRow[c + 1] !== undefined ? String(enRow[c + 1]).trim() : '';
+      }
+      for (var r = 1; r < rows.length; r++) {
+        var row = rows[r];
+        if (!row || !row[0]) continue;
+        var lang = String(row[0]).trim().toUpperCase();
+        if (!langCodeRegex.test(lang)) continue;
+        if (languages.indexOf(lang) !== -1) continue;
+        languages.push(lang);
+        langData[lang] = {};
+        for (var c = 0; c < columns.length; c++) {
+          langData[lang][columns[c]] = row[c + 1] !== undefined ? String(row[c + 1]).trim() : '';
+        }
+      }
+    }
+
+    translationData = { languages: languages, columns: columns, rows: langData, en: enData, formatB: isFormatB };
+    uploadStatus.textContent = '✓ ' + languages.length + ' languages, ' + columns.length + ' fields (' + (isFormatB ? 'horizontal' : 'vertical') + ' format)';
+    uploadStatus.style.color = 'var(--success)';
+    buildLanguageList();
+    buildMappingList();
+    translateConfig.style.display = 'block';
+    createBtn.disabled = !canTranslate();
+  }
+
+  function buildLanguageList() {
+    langList.innerHTML = '';
+    translationData.languages.forEach(function(lang) {
+      if (lang === 'EN') return; // skip EN, it's the source
+      var lbl = document.createElement('label');
+      lbl.className = 'lang-chip';
+      lbl.innerHTML = '<input type="checkbox" value="' + lang + '" checked /> ' + lang;
+      lbl.querySelector('input').addEventListener('change', function() {
+        updateCheckAll();
+        createBtn.disabled = !canTranslate();
+        updateTranslateBannerCount();
+      });
+      langList.appendChild(lbl);
+    });
+    checkAll.checked = true;
+  }
+
+  checkAll.addEventListener('change', function() {
+    var checked = checkAll.checked;
+    langList.querySelectorAll('input[type=checkbox]').forEach(function(cb) { cb.checked = checked; });
+    createBtn.disabled = !canTranslate();
+    updateTranslateBannerCount();
+  });
+
+  function updateTranslateBannerCount() {
+    var countEl = document.getElementById('translateBannerCount');
+    if (!countEl || !translationData) return;
+    var checkedLangs = [];
+    langList.querySelectorAll('input[type=checkbox]').forEach(function(cb) {
+      if (cb.checked) checkedLangs.push(cb.value);
+    });
+    if (checkedLangs.length === 0) { countEl.innerHTML = ''; return; }
+
+    if (masterfileData && masterfileData.langMap) {
+      // Masterfile loaded — show per-language count directly from langMap
+      var lines = checkedLangs.map(function(l) {
+        var sizes = masterfileData.langMap[l] || [];
+        return '<span style="color:var(--text)">' + l + '</span>: ' + sizes.length + ' banner' + (sizes.length !== 1 ? 's' : '');
+      });
+      countEl.innerHTML = lines.join('<br>');
+    } else {
+      // No masterfile — ask plugin for total frame count
+      par.postMessage({ pluginMessage: { type: 'GET_FRAME_COUNT' } }, '*');
+    }
+  }
+
+  function updateCheckAll() {
+    var all = langList.querySelectorAll('input[type=checkbox]');
+    var checked = langList.querySelectorAll('input[type=checkbox]:checked');
+    checkAll.checked = all.length === checked.length;
+    checkAll.indeterminate = checked.length > 0 && checked.length < all.length;
+  }
+
+  function getSelectedLanguages() {
+    var langs = [];
+    langList.querySelectorAll('input[type=checkbox]:checked').forEach(function(cb) { langs.push(cb.value); });
+    return langs;
+  }
+
+  function buildMappingList() {
+    mappingList.innerHTML = '';
+    par.postMessage({ pluginMessage: { type: 'GET_TEXT_LAYERS' } }, '*');
+  }
+
+  function buildMappingListWithLayers(textLayers) {
+    mappingList.innerHTML = '';
+    var enRow = translationData.en || {};
+    var anyMatch = false;
+
+    // Normalize text for comparison — collapse whitespace and newlines
+    function normalizeText(t) {
+      return t.replace(/\s+/g, ' ').trim().toLowerCase();
+    }
+
+    console.log("Layers:", textLayers.map(function(l){return JSON.stringify(l.text.substring(0,30));}));
+    console.log("EN:", JSON.stringify(enRow));
+    translationData.columns.forEach(function(col) {
+      var enText = enRow[col];
+      if (!enText || !enText.trim()) return;
+
+      // Find matching text layer by normalized content
+      var matchedLayer = null;
+      for (var i = 0; i < textLayers.length; i++) {
+        var layerText = normalizeText(textLayers[i].text);
+        var enNorm = normalizeText(enText);
+        if (layerText === enNorm) {
+          matchedLayer = textLayers[i];
+          break;
+        }
+      }
+
+      // Only show fields that auto-matched OR show all if no matches at all
+      if (!matchedLayer && anyMatch) return;
+      if (matchedLayer) anyMatch = true;
+
+      var row = document.createElement('div');
+      row.className = 'map-row';
+      row.innerHTML = '<div class="map-field" title="' + enText + '">' + enText + '</div>' +
+        '<button class="map-btn" data-col="' + col + '">← select layer on canvas</button>';
+      var btn = row.querySelector('.map-btn');
+
+      // Auto-map if match found
+      if (matchedLayer && !mappings[col]) {
+        mappings[col] = { id: matchedLayer.id, name: matchedLayer.name };
+        btn.className = 'map-btn mapped';
+        btn.textContent = '✓ ' + matchedLayer.name;
+      }
+
+      btn.addEventListener('click', function() {
+        if (selectingField === col) {
+          selectingField = null;
+          btn.className = 'map-btn' + (mappings[col] ? ' mapped' : '');
+          btn.textContent = mappings[col] ? '✓ ' + mappings[col].name : '← select layer on canvas';
+        } else {
+          clearSelecting();
+          selectingField = col;
+          btn.className = 'map-btn selecting';
+          btn.textContent = '⏳ select text layer…';
+          par.postMessage({ pluginMessage: { type: 'GET_SELECTED_TEXT_LAYER' } }, '*');
+        }
+      });
+      mappingList.appendChild(row);
+    });
+
+    // If nothing matched at all, show all fields for manual mapping
+    if (!anyMatch) {
+      mappingList.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:4px 0">No auto-matches found. Select each layer manually.</div>';
+      console.log("Layers:", textLayers.map(function(l){return JSON.stringify(l.text.substring(0,30));}));
+    console.log("EN:", JSON.stringify(enRow));
+    translationData.columns.forEach(function(col) {
+        var enText = enRow[col];
+        if (!enText || !enText.trim()) return;
+        var row = document.createElement('div');
+        row.className = 'map-row';
+        row.innerHTML = '<div class="map-field" title="' + enText + '">' + enText + '</div>' +
+          '<button class="map-btn" data-col="' + col + '">← select layer on canvas</button>';
+        var btn = row.querySelector('.map-btn');
+        btn.addEventListener('click', function() {
+          if (selectingField === col) {
+            selectingField = null;
+            btn.className = 'map-btn' + (mappings[col] ? ' mapped' : '');
+            btn.textContent = mappings[col] ? '✓ ' + mappings[col].name : '← select layer on canvas';
+          } else {
+            clearSelecting();
+            selectingField = col;
+            btn.className = 'map-btn selecting';
+            btn.textContent = '⏳ select text layer…';
+            par.postMessage({ pluginMessage: { type: 'GET_SELECTED_TEXT_LAYER' } }, '*');
+          }
+        });
+        mappingList.appendChild(row);
+      });
+    }
+
+    createBtn.disabled = !canTranslate();
+  }
+
+  function clearSelecting() {
+    selectingField = null;
+    mappingList.querySelectorAll('.map-btn.selecting').forEach(function(b) {
+      var col = b.dataset.col;
+      b.className = 'map-btn' + (mappings[col] ? ' mapped' : '');
+      b.textContent = mappings[col] ? '✓ ' + mappings[col].name : '← select layer on canvas';
+    });
+  }
+
+  function canTranslate() {
+    if (!translationData) return false;
+    if (getSelectedLanguages().length === 0) return false;
+    var mapped = Object.keys(mappings).length;
+    return mapped > 0;
+  }
+
+  // ── Messages from plugin ──
+  function handleTranslateMessages(msg) {
+    if (msg.type === 'TEXT_LAYER_SELECTED') {
+      if (selectingField && msg.id) {
+        mappings[selectingField] = { id: msg.id, name: msg.name };
+        var btn = mappingList.querySelector('[data-col="' + selectingField + '"]');
+        if (btn) { btn.className = 'map-btn mapped'; btn.textContent = '✓ ' + msg.name; }
+        selectingField = null;
+        createBtn.disabled = !canTranslate();
+      }
+    }
+    if (msg.type === 'NO_TEXT_LAYER') {
+      if (selectingField) {
+        var btn2 = mappingList.querySelector('[data-col="' + selectingField + '"]');
+        if (btn2) { btn2.className = 'map-btn'; btn2.textContent = '⚠ not a text layer'; }
+        selectingField = null;
+      }
+    }
+    if (msg.type === 'TEXT_LAYERS') {
+      buildMappingListWithLayers(msg.layers || []);
+    }
+    if (msg.type === 'PAGES_LIST') {
+      console.log('PAGES_LIST received:', msg.pages);
+      exportLangList.innerHTML = '';
+      exportCheckAll.checked = true;
+      msg.pages.forEach(function(pageName) {
+        var lbl = document.createElement('label');
+        lbl.className = 'lang-chip';
+        lbl.innerHTML = '<input type="checkbox" value="' + pageName + '" checked /> ' + extractSizeLabel(pageName);
+        lbl.querySelector('input').addEventListener('change', function() {
+          var all = exportLangList.querySelectorAll('input');
+          var checked = exportLangList.querySelectorAll('input:checked');
+          exportCheckAll.checked = all.length === checked.length;
+          exportCheckAll.indeterminate = checked.length > 0 && checked.length < all.length;
+        });
+        exportLangList.appendChild(lbl);
+      });
+      // Auto-show language section if pages found
+      if (msg.pages.length > 0) {
+        document.getElementById('exportAll').checked = true;
+        exportLangSection.style.display = 'block';
+        updateExportInfo();
+      }
+    }
+    if (msg.type === 'EXPORT_PROGRESS') {
+      showStatus('loading', '<span class="spinner"></span> ' + msg.message);
+      setProgress(msg.done || 0, msg.total || 0, msg.detail || '');
+      if (msg.detail) addExportLog(msg.detail);
+    }
+    if (msg.type === 'EXPORT_ERROR') {
+      btnLabel.textContent = 'Export';
+      createBtn.disabled = false;
+      setProgress(0, 0, '');
+      showStatus('error', msg.message);
+      addExportLog('✗ ' + msg.message);
+    }
+    if (msg.type === 'FRAME_COUNT') {
+      var countEl = document.getElementById('translateBannerCount');
+      if (countEl) {
+        var checkedLangs = [];
+        langList.querySelectorAll('input[type=checkbox]').forEach(function(cb) {
+          if (cb.checked) checkedLangs.push(cb.value);
+        });
+        // No masterfile — all languages get all banners
+        var lines = checkedLangs.map(function(l) {
+          return '<span style="color:var(--text)">' + l + '</span>: ' + msg.count + ' banner' + (msg.count !== 1 ? 's' : '');
+        });
+        countEl.innerHTML = lines.join('<br>');
+      }
+    }
+
+    if (msg.type === 'TRANSLATE_PROGRESS') {
+      showStatus('loading', '<span class="spinner"></span> ' + msg.message);
+      setProgress(msg.done || 0, msg.total || 0, msg.detail || '');
+    }
+    if (msg.type === 'TRANSLATE_DONE') {
+      btnLabel.textContent = 'Translate banners';
+      createBtn.disabled = !canTranslate();
+      setProgress(0, 0, '');
+      showStatus('success', msg.message);
+    }
+  }
+
+  // ── Parse batch input ──
+  function parseBatch() {
+    var lines = batchInput.value.split('\n');
+    var sizes = [];
+    var prefix = '';
+    var col1Persist = '';
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (!line.trim()) continue;
+
+      var cols = line.split('\t');
+      var nums = [];
+      var textParts = [];
+
+      for (var c = 0; c < cols.length; c++) {
+        var v = cols[c].trim();
+        if (v === '') continue;
+        if (/^\d+$/.test(v)) {
+          nums.push(parseInt(v, 10));
+        } else {
+          // Could be "WxH" format
+          var mx = v.match(/^(\d+)\s*[x×]\s*(\d+)$/i);
+          if (mx) {
+            nums.push(parseInt(mx[1],10));
+            nums.push(parseInt(mx[2],10));
+          } else {
+            textParts.push(v);
+          }
+        }
+      }
+
+      // Row has text → start new prefix group
+      // Use only text parts + any numeric prefix tokens (not the last 2 which are W×H)
+      if (textParts.length > 0) {
+        // Prefix = all text parts + numeric parts except last 2 (W and H)
+        var prefixNums = nums.length > 2 ? nums.slice(0, nums.length - 2) : [];
+        var prefixParts = textParts.concat(prefixNums.map(String));
+        prefix = prefixParts.join('_').replace(/\s+/g, '_');
+        col1Persist = textParts[0].trim().split(/\s+/).map(function(w) {
+          return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+        }).join('');
+      }
+
+      // Extract W and H from last 2 numbers
+      if (nums.length < 2) continue;
+      var w = nums[nums.length - 2];
+      var h = nums[nums.length - 1];
+      if (w <= 0 || h <= 0) continue;
+
+      var label = prefix ? prefix + '_' + w + 'x' + h : w + 'x' + h;
+      sizes.push({ width: w, height: h, label: label, col1: col1Persist });
+    }
+
+    batchCount.textContent = sizes.length > 0 ? sizes.length + ' sizes detected' : '';
+    return sizes;
+  }
+
+  batchInput.addEventListener('input', function() { parseBatch(); updateBtn(); });
+
+  // ── Ratio hint (single mode) ──
+  function gcd(a, b) { a = Math.round(a); b = Math.round(b); return b === 0 ? a : gcd(b, a % b); }
+  function ratioStr(w, h) { var g = gcd(w, h); return (w/g) + ':' + (h/g); }
+
+  function getBestVariant(w, h) {
+    if (!variants.length) return null;
+    var tr = w / h;
+    var targetIsPortrait = h > w;
+    var masterW = parseInt(widthInput.dataset.masterW || 1080, 10);
+    var masterH = parseInt(widthInput.dataset.masterH || 1920, 10);
+    var rx = w / masterW;
+    var ry = h / masterH;
+    var preferSquare = targetIsPortrait && (ry < rx);
+
+    var best = null; var bd = Infinity;
+    var bestOrientation = null; var bdo = Infinity;
+    var squareVariant = null;
+
+    console.log("getBestVariant " + w + "x" + h + " portrait=" + targetIsPortrait + " rx=" + rx.toFixed(3) + " ry=" + ry.toFixed(3) + " preferSquare=" + preferSquare);
+    for (var i = 0; i < variants.length; i++) {
+      var v = variants[i];
+      var vr = v.width / v.height;
+      var d = Math.abs(vr - tr);
+      var isSquare = v.width === v.height;
+      if (isSquare) squareVariant = v;
+      var sameOrientation = (targetIsPortrait && v.height > v.width) ||
+                            (!targetIsPortrait && w !== h && v.width > v.height);
+      console.log("  v=" + v.name + " " + v.width + "x" + v.height + " square=" + isSquare + " sameOrientation=" + sameOrientation + " d=" + d.toFixed(3));
+      if (sameOrientation && d < bdo) { bdo = d; bestOrientation = v; }
+      if (d < bd) { bd = d; best = v; }
+    }
+    var result = (preferSquare && squareVariant) ? squareVariant : (bestOrientation || best);
+    console.log("  → chosen=" + (result ? result.name : 'null') + " preferSquare=" + preferSquare);
+    return result;
+  }
+
+  function updateRatioHint() {
+    var w = parseInt(widthInput.value, 10);
+    var h = parseInt(heightInput.value, 10);
+    if (!w || !h) { ratioHint.textContent = ''; highlightVariant(null); return; }
+    var r = ratioStr(w, h);
+    if (variants.length) {
+      var best = getBestVariant(w, h);
+      highlightVariant(best);
+      ratioHint.textContent = best ? 'Ratio ' + r + ' — will use variant ' + best.width + '×' + best.height : 'Ratio ' + r;
+    } else {
+      ratioHint.textContent = 'Ratio ' + r;
+    }
+  }
+
+  function highlightVariant(best) {
+    var chips = variantsList.querySelectorAll('.vchip');
+    for (var i = 0; i < chips.length; i++) {
+      chips[i].classList.remove('match');
+      if (best && chips[i].dataset.name === best.name) chips[i].classList.add('match');
+    }
+  }
+
+  function updateBtn() {
+    if (mode === 'export') { createBtn.disabled = false; return; }
+    if (mode === 'translate') { createBtn.disabled = !canTranslate(); return; }
+    if (!selFound) { createBtn.disabled = true; return; }
+    if (mode === 'single') {
+      createBtn.disabled = !(parseInt(widthInput.value,10) > 0 && parseInt(heightInput.value,10) > 0);
+    } else {
+      createBtn.disabled = parseBatch().length === 0;
+    }
+  }
+
+  widthInput.addEventListener('input',  function() { updateRatioHint(); updateBtn(); });
+  heightInput.addEventListener('input', function() { updateRatioHint(); updateBtn(); });
+
+  // ── Create ──
+  createBtn.addEventListener('click', function() {
+    if (mode === 'single') {
+      par.postMessage({ pluginMessage: {
+        type: 'RESIZE_BANNER',
+        width: parseInt(widthInput.value, 10),
+        height: parseInt(heightInput.value, 10),
+        label: labelInput.value.trim() || null,
+      }}, '*');
+    } else if (mode === 'batch') {
+      var sizes = parseBatch();
+      if (!sizes.length) return;
+      var perRow = parseInt(document.getElementById('bannersPerRow').value, 10) || 5;
+      par.postMessage({ pluginMessage: { type: 'BATCH_RESIZE', sizes: sizes, maxPerRow: perRow } }, '*');
+    } else if (mode === 'export') {
+      var scope  = document.querySelector('input[name=exportScope]:checked').value;
+      var format = document.querySelector('input[name=exportFormat]:checked').value;
+      var scale  = parseFloat(document.getElementById('exportScale').value);
+      var exportLangs = scope === 'all' ? getSelectedExportLangs() : [];
+      exportLog.innerHTML = ''; exportLog.style.display = 'block';
+      window._exportZip = new JSZip();
+      window._pdfFrames = [];
+      window._pendingCompress = 0;
+      window._exportDoneMsg = null;
+      addExportLog('Starting export — scope=' + scope + ' format=' + format + ' scale=' + scale + (exportLangs.length ? ' langs=' + exportLangs.join(',') : ''));
+      btnLabel.innerHTML = '<span class="spinner"></span> Exporting…';
+      createBtn.disabled = true;
+      par.postMessage({ pluginMessage: { type: 'EXPORT_BANNERS', scope: scope, format: format, scale: scale, languages: exportLangs } }, '*');
+    } else if (mode === 'translate') {
+      var langs = getSelectedLanguages();
+      if (!langs.length || !translationData) return;
+      btnLabel.innerHTML = '<span class="spinner"></span> Translating…';
+      createBtn.disabled = true;
+      setProgress(0, langs.length, '0/' + langs.length + ' languages');
+      showStatus('loading', '<span class="spinner"></span> Starting translation…');
+      par.postMessage({ pluginMessage: {
+        type: 'TRANSLATE_BANNERS',
+        languages: langs,
+        mappings: mappings,
+        rows: translationData.rows,
+        sizeRules: masterfileData ? masterfileData.langMap : null,
+      }}, '*');
+    }
+  });
+
+  // ── Messages ──
+  window.onmessage = function(event) {
+    var msg = event.data.pluginMessage;
+    if (!msg) return;
+
+    // Handle translate-specific messages
+    if (msg.type === 'EXPORT_FILE') {
+      var isPDF = msg.format === 'PDF';
+      if (isPDF) {
+        // Collect frames for PDF assembly
+        if (!window._pdfFrames) window._pdfFrames = [];
+        window._pdfFrames.push({
+            name: msg.name,
+            bytes: msg.bytes,
+            width: msg.width,
+            height: msg.height,
+            folder: msg.folder,
+            x: msg.x,
+            y: msg.y
+        });
+      } else {
+        if (!window._exportZip) window._exportZip = new JSZip();
+        var compressChk = document.getElementById('compressBelow150');
+        var shouldCompress = compressChk && compressChk.checked;
+        // Correct extension to match selected format
+        var _base = msg.name.replace(/\.(png|jpg|jpeg)$/i, '');
+        var _fixedName = _base + (msg.format === 'JPG' ? '.jpg' : '.png');
+        if (shouldCompress) {
+          window._pendingCompress = (window._pendingCompress || 0) + 1;
+          var _mb = msg.bytes, _mf = msg.folder, _bn = _base, _fmt = msg.format;
+          compressToTarget(_mb, 150, _fmt, function(compressed, ext) {
+            var fname = _bn + '.' + ext;
+            var path = _mf ? _mf + '/' + fname : fname;
+            var kb = Math.round(compressed.byteLength / 1024);
+            addExportLog('  ' + fname + ' → ' + kb + 'kb');
+            if (!window._exportZip) window._exportZip = new JSZip();
+            window._exportZip.file(path, new Uint8Array(compressed));
+            window._pendingCompress = Math.max(0, (window._pendingCompress || 1) - 1);
+            if (window._pendingCompress === 0 && window._exportDoneMsg) {
+              finalizeZipExport(window._exportDoneMsg);
+              window._exportDoneMsg = null;
+            }
+          });
+        } else {
+          var path = _mf ? _mf + '/' + _fixedName : _fixedName;
+          window._exportZip.file(path, new Uint8Array(msg.bytes));
+        }
+      }
+    }
+
+    if (msg.type === 'EXPORT_DONE') {
+      var isPDF = msg.format === 'PDF';
+      if (isPDF && window._pdfFrames && window._pdfFrames.length > 0) {
+        addExportLog('📄 Generating PDF (' + window._pdfFrames.length + ' banners)…');
+        buildPDF(window._pdfFrames).then(function() {
+          window._pdfFrames = null;
+          btnLabel.textContent = 'Export';
+          createBtn.disabled = false;
+          setProgress(0, 0, '');
+          showStatus('success', msg.message);
+          addExportLog('✓ ' + msg.message);
+        });
+      } else if (window._exportZip) {
+        if ((window._pendingCompress || 0) > 0) {
+          window._exportDoneMsg = msg;
+          addExportLog('Waiting for ' + window._pendingCompress + ' compression(s)...');
+        } else {
+          finalizeZipExport(msg);
+        }
+      } else {
+        btnLabel.textContent = 'Export';
+        createBtn.disabled = false;
+        setProgress(0, 0, '');
+        showStatus('success', msg.message);
+        addExportLog('✓ ' + msg.message);
+      }
+    }
+
+    if (msg.type === 'TEXT_LAYER_SELECTED' || msg.type === 'NO_TEXT_LAYER' ||
+        msg.type === 'TRANSLATE_PROGRESS' || msg.type === 'TRANSLATE_DONE' ||
+        msg.type === 'TEXT_LAYERS' || msg.type === 'EXPORT_PROGRESS' ||
+        msg.type === 'PAGES_LIST') {
+      handleTranslateMessages(msg); return;
+    }
+
+    if (msg.type === 'TEMPLATES_LIST') {
+      templateSelect.innerHTML = '<option value="">— Select a template —</option>';      for (var i = 0; i < msg.templates.length; i++) {
+        var t = msg.templates[i];
+        var opt = document.createElement('option');
+        opt.value = t.id;
+        opt.dataset.variantName = t.name;
+        opt.dataset.variantRawName = t.variantRawName || t.name;
+        opt.textContent = extractSizeLabel(t.name);
+        templateSelect.appendChild(opt);
+      }
+      // Only show template row if there are templates
+      templateRow.style.display = msg.templates.length > 0 ? 'flex' : 'none';
+    }
+
+    if (msg.type === 'MASTER_INFO') {
+      variants = []; variantsList.innerHTML = '';
+      // Reset template dropdown to placeholder when selection changes
+      templateSelect.selectedIndex = 0;
+      if (msg.found) {
+        selFound = true;
+        selDot.className = 'dot ok'; selCard.className = 'sel-card ok';
+        selName.textContent = extractSizeLabel(msg.name); selSize.textContent = msg.width + ' × ' + msg.height;
+        // Store master dimensions for variant prediction
+        widthInput.dataset.masterW = msg.width;
+        widthInput.dataset.masterH = msg.height;
+        statusEl.className = 'status';
+        // Sync dropdown to currently selected frame
+        for (var i = 0; i < templateSelect.options.length; i++) {
+          if (templateSelect.options[i].text.indexOf(msg.name) === 0) {
+            templateSelect.selectedIndex = i; break;
+          }
+        }
+        if (msg.variants && msg.variants.length) {
+          variants = msg.variants;
+          selSub.textContent = msg.variants.length + ' campaign variants available';
+          variantsWrap.style.display = 'block';
+          for (var i = 0; i < variants.length; i++) {
+            var chip = document.createElement('div');
+            chip.className = 'vchip'; chip.dataset.name = variants[i].name;
+            chip.textContent = extractSizeLabel(variants[i].name);
+            variantsList.appendChild(chip);
+          }
+        } else {
+          selSub.textContent = 'No Component Set found — will resize as-is';
+          variantsWrap.style.display = 'none';
+        }
+        updateBtn(); updateRatioHint();
+      } else {
+        selFound = false; selDot.className = 'dot'; selCard.className = 'sel-card';
+        selName.textContent = '← Select a frame on the canvas';
+        selSize.textContent = ''; selSub.textContent = '';
+        variantsWrap.style.display = 'none';
+        statusEl.className = 'status';
+        updateBtn(); // use updateBtn so export tab stays enabled
+      }
+    }
+
+    if (msg.type === 'LOADING') {
+      btnLabel.innerHTML = '<span class="spinner"></span> Creating…';
+      createBtn.disabled = true;
+      setProgress(0, 0, '');
+      showStatus('loading', msg.message || 'Creating banner…');
+    }
+    if (msg.type === 'PROGRESS') {
+      setProgress(msg.done, msg.total, msg.message);
+      showStatus('loading', '<span class="spinner"></span> Creating banners…');
+    }
+    if (msg.type === 'SUCCESS') {
+      btnLabel.textContent = mode === 'batch' ? 'Create banners' : 'Create banner';
+      setProgress(0, 0, '');
+      showStatus('success', msg.message);
+      updateBtn();
+    }
+    if (msg.type === 'ERROR') {
+      btnLabel.textContent = mode === 'batch' ? 'Create banners' : 'Create banner';
+      setProgress(0, 0, '');
+      showStatus('error', msg.message);
+      updateBtn();
+    }
+  };
+
+  function finalizeZipExport(doneMsg) {
+    addExportLog('Generating zip...');
+    window._exportZip.generateAsync({ type: 'blob' }).then(function(blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'banners_export.zip';
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      window._exportZip = null; window._pendingCompress = 0;
+      addExportLog('✓ Downloaded banners_export.zip');
+    });
+    btnLabel.textContent = 'Export'; createBtn.disabled = false;
+    setProgress(0, 0, ''); showStatus('success', doneMsg.message);
+    addExportLog('✓ ' + doneMsg.message);
+  }
+
+  function showStatus(type, text) { statusEl.className = 'status ' + type; statusEl.innerHTML = text; }
+
+  // ── IMAGE COMPRESSION ─────────────────────────────────────────────────────
+  // Compress PNG bytes to JPEG below targetKB using canvas quality stepping
+  function compressToTarget(pngBytes, targetKB, format, callback) {
+    var targetBytes = targetKB * 1024;
+    var useJpeg = (format === 'JPG');
+    // If PNG format and already small enough — keep as-is
+    if (!useJpeg && pngBytes.byteLength <= targetBytes) {
+      callback(pngBytes, 'png'); return;
+    }
+    var uint8 = new Uint8Array(pngBytes);
+    var blob = new Blob([uint8], { type: 'image/png' });
+    var url = URL.createObjectURL(blob);
+    var img = new Image();
+    img.onload = function() {
+      var canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      var ctx = canvas.getContext('2d');
+      if (useJpeg) { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+      ctx.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      var mimeType = useJpeg ? 'image/jpeg' : 'image/png';
+      var outExt = useJpeg ? 'jpg' : 'png';
+      // Use 147kb as effective target to give 3kb headroom against browser rounding
+      var effectiveTarget = Math.floor(targetBytes * 0.98);
+      var lo = 0.05, hi = 0.95, quality = pngBytes.byteLength <= targetBytes ? 0.92 : 0.8;
+      var result = null;
+      for (var iter = 0; iter < 20; iter++) {
+        var dataUrl = canvas.toDataURL(mimeType, quality);
+        var base64 = dataUrl.split(',')[1];
+        var byteLen = Math.round(base64.length * 3 / 4);
+        if (byteLen <= effectiveTarget) { result = base64; lo = quality; }
+        else { hi = quality; }
+        var nextQ = (lo + hi) / 2;
+        if (Math.abs(nextQ - quality) < 0.001) break; // converged
+        quality = nextQ;
+      }
+      // Final safety check — if result is still over target, step down quality manually
+      if (result) {
+        var finalLen = Math.round(atob(result).length);
+        if (finalLen > targetBytes) {
+          for (var q2 = lo - 0.02; q2 >= 0.05; q2 -= 0.01) {
+            var du2 = canvas.toDataURL(mimeType, q2);
+            var b2 = du2.split(',')[1];
+            if (Math.round(b2.length * 3 / 4) <= targetBytes) { result = b2; break; }
+          }
+        }
+      }
+      if (!result) { var dataUrl = canvas.toDataURL(mimeType, useJpeg ? 0.05 : undefined); result = dataUrl.split(',')[1]; }
+      var binary = atob(result);
+      var bytes = new Uint8Array(binary.length);
+      for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      callback(bytes.buffer, outExt);
+    };
+    img.onerror = function() { callback(pngBytes, 'png'); };
+    img.src = url;
+  }
+
+  // ── PDF BUILDER ───────────────────────────────────────────────────────────
+  // Layout: all banners in rows, max page width 10000px, label above each banner
+  async function buildPDF(frames) {
+    var PAGE_MAX_W = 10000; // max row width in px
+    var GAP = 40;           // gap between banners
+    var LABEL_H = 50;       // label height above each banner
+    var MARGIN = 40;        // page margin
+
+    // px → pt (1pt = 1/72in, 1px = 0.75pt at 96dpi)
+    // jsPDF max page = 14400pt. 10000px = 7500pt — safe.
+    function pxToPt(px) { return px * 0.75; }
+
+    // Extract retailer from frame name
+    // e.g. "EMEA_Nighti_Web-banners_Prenatal_Image-1_600x600_EN" → "Prenatal"
+    // Looks for the segment between "banners_" (or "banners-") and the size pattern
+    function extractRetailer(name) {
+      // Strip extension
+      name = name.replace(/\.[^.]+$/, '');
+      // Match segment after "banners_" or "banners-" and before the size pattern (NNNxNNN or NNNxNNNpx)
+      // Handles both x and × (u00D7), with optional px suffix
+      var m = name.match(/banners[-_]([^_-]+?)[-_](?:Image|image|\d+[x\u00D7]\d+)/i);
+      if (m) return m[1].toLowerCase();
+      // Fallback: segment between last _ before size pattern
+      var m2 = name.match(/[-_]([^-_]+?)[-_]\d+[x\u00D7]\d+/i);
+      if (m2) return m2[1].toLowerCase();
+      // Last fallback: use folder
+      return (name.folder || '').toLowerCase();
+    }
+
+    // Split frames into rows: break on retailer change OR width limit
+    var rows = [];
+    var curRow = [];
+    var curW = MARGIN * 2;
+    var curRetailer = null;
+
+    for (var i = 0; i < frames.length; i++) {
+      var frame = frames[i];
+      var fw = frame.width || 400;
+      var frameRetailer = extractRetailer(frame.name);
+
+      // Break if: width exceeded OR retailer changes (and row is not empty)
+      var widthBreak = curRow.length > 0 && curW + fw > PAGE_MAX_W;
+      var retailerBreak = curRow.length > 0 && frameRetailer && curRetailer && frameRetailer !== curRetailer;
+
+      if (widthBreak || retailerBreak) {
+        rows.push(curRow);
+        curRow = [];
+        curW = MARGIN * 2;
+        if (retailerBreak) console.log('[PDF] new page: retailer changed ' + curRetailer + ' → ' + frameRetailer);
+      }
+
+      if (curRow.length === 0) curRetailer = frameRetailer;
+      curRow.push(frame);
+      curW += fw + GAP;
+    }
+    if (curRow.length > 0) rows.push(curRow);
+
+    console.log('[PDF] ' + frames.length + ' banners → ' + rows.length + ' pages');
+    rows.forEach(function(r, i) {
+      var w = MARGIN * 2;
+      r.forEach(function(f) { w += (f.width||400) + GAP; });
+      console.log('[PDF] page ' + (i+1) + ': ' + r.length + ' banners, ~' + (w-GAP) + 'px wide');
+    });
+
+    if (rows.length === 0) return;
+
+    var { jsPDF } = window.jspdf;
+    var doc = null;
+
+    for (var ri = 0; ri < rows.length; ri++) {
+      var row = rows[ri];
+
+      // Page size = exact fit for this row
+      var pageWpx = MARGIN;
+      var pageMaxH = 0;
+      for (var fi = 0; fi < row.length; fi++) {
+        pageWpx += (row[fi].width || 400) + GAP;
+        pageMaxH = Math.max(pageMaxH, row[fi].height || 300);
+      }
+      pageWpx = pageWpx - GAP + MARGIN; // remove trailing gap, add right margin
+      var pageHpx = pageMaxH + LABEL_H + MARGIN * 2;
+
+      var pwPt = pxToPt(pageWpx);
+      var phPt = pxToPt(pageHpx);
+
+      if (!doc) {
+        doc = new jsPDF({ orientation: 'l', unit: 'pt', format: [pwPt, phPt] });
+      } else {
+        doc.addPage([pwPt, phPt], 'l');
+      }
+
+      var curXpx = MARGIN;
+      for (var fi = 0; fi < row.length; fi++) {
+        var frame = row[fi];
+        var fw = frame.width || 400;
+        var fh = frame.height || 300;
+
+        // Banner name label
+        var labelText = frame.name.replace(/\.[^.]+$/, '');
+        var fontSize = Math.max(8, Math.min(18, fw * 0.012));
+        doc.setFontSize(fontSize);
+        doc.setTextColor(50, 50, 50);
+        doc.text(labelText, pxToPt(curXpx), pxToPt(MARGIN + LABEL_H * 0.65), { maxWidth: pxToPt(fw) });
+
+        // Banner image
+        var imgData = 'data:image/png;base64,' + _arrayBufferToBase64(frame.bytes);
+        try {
+          doc.addImage(imgData, 'PNG',
+            pxToPt(curXpx), pxToPt(MARGIN + LABEL_H),
+            pxToPt(fw), pxToPt(fh),
+            'b' + ri + '_' + fi, 'FAST'
+          );
+        } catch(e) { console.error('[PDF] addImage failed:', frame.name, e); }
+
+        curXpx += fw + GAP;
+      }
+    }
+
+    doc.save('banners_export.pdf');
+    addExportLog('✓ banners_export.pdf — ' + rows.length + ' pages, ' + frames.length + ' banners');
+  }
+
+  function _arrayBufferToBase64(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = '';
+    for (var i = 0; i < bytes.byteLength; i++) { binary += String.fromCharCode(bytes[i]); }
+    return window.btoa(binary);
+  }
+
+  // Extract size label from frame name e.g. "EMEA_..._160×600px_..." → "160×600px"
+  // Falls back to full name if no size pattern found
+  function extractSizeLabel(name) {
+    // Match patterns like 160x600, 160×600, 160x600px, 1080x1920px
+    var m = name.match(/(\d+\s*[x×]\s*\d+\s*(?:px)?)/i);
+    if (m) return m[1].replace(/\s+/g, '');
+    // Match WxH at end of underscore-separated name
+    var m2 = name.match(/_(\d+)[x×](\d+)(?:px)?(?:_|$)/i);
+    if (m2) return m2[1] + '×' + m2[2];
+    return name;
+  }
+</script>
+  </body>
+</html><!-- This is appended - will be replaced below -->

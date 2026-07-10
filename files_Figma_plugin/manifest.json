@@ -1,0 +1,17 @@
+{
+  "name": "Magic Resizer Test",
+  "id": "magic-resizer-plugin",
+  "api": "1.0.0",
+  "main": "code.js",
+  "ui": "ui.html",
+  "editorType": [
+    "figma"
+  ],
+  "documentAccess": "dynamic-page",
+  "networkAccess": {
+    "allowedDomains": [
+      "https://magic-resizer-license.onrender.com",
+      "https://cdnjs.cloudflare.com"
+    ]
+  }
+}
