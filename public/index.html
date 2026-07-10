@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Magic Resizer — License Dashboard</title>
-<style>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Magic Resizer — License Dashboard</title>
+    <style>
   :root {
     --bg: #111; --surface: #1c1c1c; --border: #2e2e2e;
     --accent: #FF3700; --accent-dark: #C22800;
@@ -65,80 +65,123 @@
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); padding: 10px 16px; border-radius: 6px; font-size: 12px; display: none; }
   .toast.visible { display: block; }
 </style>
-</head>
-<body>
+  </head>
+  <body>
 
-  <div id="loginScreen">
-    <div class="login-card">
-      <div class="logo" style="margin: 0 auto 14px;"></div>
-      <h2>License Dashboard</h2>
-      <p>Enter your admin secret to continue</p>
-      <input type="password" id="secretInput" placeholder="Admin secret" style="margin-bottom: 10px;" />
-      <button class="btn-primary" id="loginBtn">Enter</button>
-      <p id="loginError" style="color: var(--error); font-size: 11px; margin-top: 10px;"></p>
-    </div>
-  </div>
-
-  <div id="dashboardScreen" style="display:none;">
-    <header>
-      <div class="logo"></div>
-      <div>
-        <h1>Magic Resizer</h1>
-        <div class="sub">License Dashboard</div>
+    <div id="loginScreen">
+      <div class="login-card">
+        <div class="logo" style="margin: 0 auto 14px;"></div>
+        <h2>License Dashboard</h2>
+        <p>Enter your admin secret to continue</p>
+        <input type="password" id="secretInput" placeholder="Admin secret"
+          style="margin-bottom: 10px;" />
+        <button class="btn-primary" id="loginBtn">Enter</button>
+        <p id="loginError"
+          style="color: var(--error); font-size: 11px; margin-top: 10px;"></p>
       </div>
-    </header>
-    <main>
-      <div class="toolbar">
-        <h2 id="keyCount">Licenses</h2>
-        <div class="toolbar-actions">
-          <button class="btn-ghost" id="refreshBtn">Refresh</button>
-          <button class="btn-primary" id="newKeyBtn" style="width:auto;">+ New License</button>
+    </div>
+
+    <div id="dashboardScreen" style="display:none;">
+      <header>
+        <div class="logo"></div>
+        <div>
+          <h1>Magic Resizer</h1>
+          <div class="sub">License Dashboard</div>
+        </div>
+      </header>
+      <main>
+        <div class="toolbar">
+          <h2>Today's Activity</h2>
+          <div class="toolbar-actions">
+            <button class="btn-ghost" id="refreshOverviewBtn">Refresh</button>
+          </div>
+        </div>
+        <table style="margin-bottom: 28px;">
+          <thead>
+            <tr>
+              <th>Owner</th>
+              <th>Key</th>
+              <th>Exports today</th>
+              <th>Time today</th>
+            </tr>
+          </thead>
+          <tbody id="overviewTableBody"></tbody>
+        </table>
+        <div class="empty" id="overviewEmpty" style="display:none;">No activity
+          recorded yet today.</div>
+
+        <div class="toolbar">
+          <h2 id="keyCount">Licenses</h2>
+          <div class="toolbar-actions">
+            <button class="btn-ghost" id="refreshBtn">Refresh</button>
+            <button class="btn-primary" id="newKeyBtn" style="width:auto;">+ New
+              License</button>
+          </div>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Key</th>
+              <th>Owner</th>
+              <th>Status</th>
+              <th>Devices</th>
+              <th>Expires</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="keysTableBody"></tbody>
+        </table>
+        <div class="empty" id="emptyState" style="display:none;">No licenses yet
+          — create one to get started.</div>
+      </main>
+    </div>
+
+    <!-- New key modal -->
+    <div class="modal-backdrop hidden" id="newKeyModal">
+      <div class="modal">
+        <h3>New License</h3>
+        <div class="field">
+          <label>Owner name</label>
+          <input type="text" id="newOwner" placeholder="e.g. Jane" />
+        </div>
+        <div class="field">
+          <label>Max devices</label>
+          <input type="number" id="newMaxDevices" value="1" min="1" />
+        </div>
+        <div class="field">
+          <label>Expires (optional)</label>
+          <input type="date" id="newExpiresAt" />
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="cancelNewKey">Cancel</button>
+          <button class="btn-primary" id="confirmNewKey">Create</button>
         </div>
       </div>
+    </div>
 
-      <table>
-        <thead>
-          <tr>
-            <th>Key</th>
-            <th>Owner</th>
-            <th>Status</th>
-            <th>Devices</th>
-            <th>Expires</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="keysTableBody"></tbody>
-      </table>
-      <div class="empty" id="emptyState" style="display:none;">No licenses yet — create one to get started.</div>
-    </main>
-  </div>
-
-  <!-- New key modal -->
-  <div class="modal-backdrop hidden" id="newKeyModal">
-    <div class="modal">
-      <h3>New License</h3>
-      <div class="field">
-        <label>Owner name</label>
-        <input type="text" id="newOwner" placeholder="e.g. Jane" />
-      </div>
-      <div class="field">
-        <label>Max devices</label>
-        <input type="number" id="newMaxDevices" value="1" min="1" />
-      </div>
-      <div class="field">
-        <label>Expires (optional)</label>
-        <input type="date" id="newExpiresAt" />
-      </div>
-      <div class="modal-actions">
-        <button class="btn-ghost" id="cancelNewKey">Cancel</button>
-        <button class="btn-primary" id="confirmNewKey">Create</button>
+    <!-- Usage modal -->
+    <div class="modal-backdrop hidden" id="usageModal">
+      <div class="modal" style="width: 420px;">
+        <h3 id="usageModalTitle">Usage</h3>
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Exports</th><th>Time in app</th></tr>
+          </thead>
+          <tbody id="usageTableBody"></tbody>
+        </table>
+        <div class="empty" id="usageEmpty"
+          style="display:none; padding: 16px;">No usage recorded yet.</div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="closeUsageModal"
+            style="flex: none; width: 100%;">Close</button>
+        </div>
       </div>
     </div>
-  </div>
 
-  <div class="toast" id="toast"></div>
+    <div class="toast" id="toast"></div>
 
-<script>
+    <script>
   var API_BASE = ''; // same origin as this dashboard; leave empty unless hosted separately
   var secret = sessionStorage.getItem('mr-admin-secret') || '';
 
@@ -186,6 +229,7 @@
       loginScreen.style.display = 'none';
       dashboardScreen.style.display = 'block';
       renderKeys(data);
+      loadOverview();
     }).catch(function () {
       loginError.textContent = 'Incorrect secret.';
     });
@@ -259,6 +303,12 @@
         actionsCell.appendChild(releaseBtn);
       }
 
+      var usageBtn = document.createElement('button');
+      usageBtn.className = 'btn-ghost btn-small';
+      usageBtn.textContent = 'Usage';
+      usageBtn.onclick = function () { openUsageModal(record.key, record.owner); };
+      actionsCell.appendChild(usageBtn);
+
       var deleteBtn = document.createElement('button');
       deleteBtn.className = 'btn-danger btn-small';
       deleteBtn.textContent = 'Delete';
@@ -273,11 +323,71 @@
     });
   }
 
+  // ─── Usage modal ────────────────────────────────────────────────────────
+  var usageModal = document.getElementById('usageModal');
+  var usageModalTitle = document.getElementById('usageModalTitle');
+  var usageTableBody = document.getElementById('usageTableBody');
+  var usageEmpty = document.getElementById('usageEmpty');
+
+  function formatDuration(totalSeconds) {
+    var h = Math.floor(totalSeconds / 3600);
+    var m = Math.floor((totalSeconds % 3600) / 60);
+    if (h > 0) return h + 'h ' + m + 'm';
+    return m + 'm';
+  }
+
+  function openUsageModal(key, owner) {
+    usageModalTitle.textContent = 'Usage — ' + (owner ? owner + ' (' + key + ')' : key);
+    usageTableBody.innerHTML = '';
+    usageEmpty.style.display = 'none';
+    usageModal.className = 'modal-backdrop';
+
+    api('/api/usage?key=' + encodeURIComponent(key) + '&days=30').then(function (data) {
+      var usage = data.usage || [];
+      usageEmpty.style.display = usage.length ? 'none' : 'block';
+      usage.forEach(function (row) {
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + row.date + '</td>' +
+          '<td>' + row.exports + '</td>' +
+          '<td>' + formatDuration(row.timeSeconds) + '</td>';
+        usageTableBody.appendChild(tr);
+      });
+    });
+  }
+
+  document.getElementById('closeUsageModal').addEventListener('click', function () {
+    usageModal.className = 'modal-backdrop hidden';
+  });
+
   function loadKeys() {
     api('/api/keys').then(renderKeys);
   }
 
   document.getElementById('refreshBtn').addEventListener('click', loadKeys);
+
+  var overviewTableBody = document.getElementById('overviewTableBody');
+  var overviewEmpty = document.getElementById('overviewEmpty');
+
+  function loadOverview() {
+    api('/api/usage-overview?days=1').then(function (list) {
+      overviewTableBody.innerHTML = '';
+      var withActivity = list.filter(function (r) { return r.exports > 0 || r.timeSeconds > 0; });
+      overviewEmpty.style.display = withActivity.length ? 'none' : 'block';
+
+      list.forEach(function (row) {
+        var tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + (row.owner || '—') + '</td>' +
+          '<td class="key-code">' + row.key + '</td>' +
+          '<td>' + row.exports + '</td>' +
+          '<td>' + formatDuration(row.timeSeconds) + '</td>';
+        overviewTableBody.appendChild(tr);
+      });
+    });
+  }
+
+  document.getElementById('refreshOverviewBtn').addEventListener('click', loadOverview);
 
   // New key modal
   var newKeyModal = document.getElementById('newKeyModal');
@@ -301,6 +411,7 @@
         document.getElementById('newExpiresAt').value = '';
         showToast('Created key: ' + result.key);
         loadKeys();
+        loadOverview();
       });
   });
 
@@ -310,5 +421,5 @@
     tryLogin();
   }
 </script>
-</body>
+  </body>
 </html>
