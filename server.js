@@ -23,6 +23,9 @@ const {
   addDevice,
   releaseDevice,
   checkAdminAuth,
+  trackExport,
+  trackHeartbeat,
+  getUsage,
 } = require('./lib/store');
 
 const app = express();
@@ -92,7 +95,42 @@ app.post('/api/verify', async (req, res) => {
   });
 });
 
-// ─── Admin: keys CRUD ───────────────────────────────────────────────────────
+// ─── Usage tracking (called by the plugin, gated on a valid+active key) ───
+const trackAttempts = new Map();
+function isTrackRateLimited(ip) {
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  const timestamps = (trackAttempts.get(ip) || []).filter((t) => t > windowStart);
+  timestamps.push(now);
+  trackAttempts.set(ip, timestamps);
+  return timestamps.length > 120; // heartbeats are frequent, allow more than /verify
+}
+
+app.post('/api/track', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  if (isTrackRateLimited(ip)) return res.status(429).json({ ok: false, reason: 'rate_limited' });
+
+  const { key, type, count, seconds } = req.body || {};
+  if (!key || typeof key !== 'string') return res.status(400).json({ ok: false, reason: 'missing_key' });
+
+  // Only track for keys that currently exist and are active — this is a
+  // secondary gate (not a licensing decision), so we fail quietly rather
+  // than surface errors that could distract from the plugin's real UI.
+  const record = await getKeyRecord(key);
+  if (!record || !record.active) return res.status(200).json({ ok: false });
+
+  if (type === 'export') {
+    await trackExport(key, typeof count === 'number' ? count : 1);
+  } else if (type === 'heartbeat') {
+    await trackHeartbeat(key, typeof seconds === 'number' ? seconds : 0);
+  } else {
+    return res.status(400).json({ ok: false, reason: 'unknown_type' });
+  }
+
+  res.status(200).json({ ok: true });
+});
+
+
 function generateKey() {
   const part = () => Math.random().toString(36).slice(2, 6).toUpperCase();
   return `MR-${part()}-${part()}-${new Date().getFullYear()}`;
@@ -185,22 +223,50 @@ app.post('/api/release-device', async (req, res) => {
   res.status(200).json({ released: deviceId || 'all', key });
 });
 
-const PORT = process.env.PORT || 3000;
+// ─── Admin: usage overview across every key (for the dashboard summary) ───
+app.get('/api/usage-overview', async (req, res) => {
+  if (!checkAdminAuth(req)) return res.status(401).json({ error: 'unauthorized' });
 
-app.get('/', (req, res) => {
-  res.status(200).send(`
-    <h1>Magic Resizer License Server</h1>
-    <p>✅ Server is running</p>
-    <p>Available endpoints:</p>
-    <ul>
-      <li>POST /api/verify</li>
-      <li>GET /api/keys</li>
-      <li>POST /api/keys</li>
-      <li>PATCH /api/keys</li>
-      <li>DELETE /api/keys</li>
-      <li>POST /api/release-device</li>
-    </ul>
-  `);
+  const days = req.query.days ? parseInt(req.query.days, 10) : 1;
+  const keys = await listKeys();
+
+  const results = await Promise.all(
+    keys.map(async (key) => {
+      const record = await getKeyRecord(key);
+      const usage = await getUsage(key, days);
+      const totals = usage.reduce(
+        (acc, row) => ({
+          exports: acc.exports + row.exports,
+          timeSeconds: acc.timeSeconds + row.timeSeconds,
+        }),
+        { exports: 0, timeSeconds: 0 }
+      );
+      return {
+        key,
+        owner: record ? record.owner : null,
+        active: record ? record.active : false,
+        exports: totals.exports,
+        timeSeconds: totals.timeSeconds,
+      };
+    })
+  );
+
+  res.status(200).json(results);
 });
 
+// ─── Admin: daily usage (exports + time in app) for a key ─────────────────
+app.get('/api/usage', async (req, res) => {
+  if (!checkAdminAuth(req)) return res.status(401).json({ error: 'unauthorized' });
+
+  const { key, days } = req.query;
+  if (!key) return res.status(400).json({ error: 'missing_key' });
+
+  const record = await getKeyRecord(key);
+  if (!record) return res.status(404).json({ error: 'key_not_found' });
+
+  const usage = await getUsage(key, days ? parseInt(days, 10) : 30);
+  res.status(200).json({ key, usage });
+});
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`License server running on port ${PORT}`));
