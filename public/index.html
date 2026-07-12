@@ -64,6 +64,12 @@
   .modal-actions button { flex: 1; }
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--surface); border: 1px solid var(--border); padding: 10px 16px; border-radius: 6px; font-size: 12px; display: none; }
   .toast.visible { display: block; }
+
+  .stats-bar { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 28px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .stat-card .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin-bottom: 6px; }
+  .stat-card .stat-value { font-size: 20px; font-weight: 700; }
+  .stat-card .stat-value.accent { color: var(--accent); }
 </style>
   </head>
   <body>
@@ -90,6 +96,25 @@
         </div>
       </header>
       <main>
+        <div class="stats-bar">
+          <div class="stat-card">
+            <div class="stat-label">Total Licenses</div>
+            <div class="stat-value" id="statTotalLicenses">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Active Licenses</div>
+            <div class="stat-value" id="statActiveLicenses">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Exports (all time)</div>
+            <div class="stat-value accent" id="statTotalExports">—</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">Total Time in App</div>
+            <div class="stat-value" id="statTotalTime">—</div>
+          </div>
+        </div>
+
         <div class="toolbar">
           <h2>Today's Activity</h2>
           <div class="toolbar-actions">
@@ -252,10 +277,23 @@
     return new Date(iso).toLocaleDateString();
   }
 
+  function updateStatsBar(list) {
+    var totalLicenses = list.length;
+    var activeLicenses = list.filter(function (r) { return r.active; }).length;
+    var totalExports = list.reduce(function (sum, r) { return sum + (r.totalExports || 0); }, 0);
+    var totalTimeSeconds = list.reduce(function (sum, r) { return sum + (r.totalTimeSeconds || 0); }, 0);
+
+    document.getElementById('statTotalLicenses').textContent = totalLicenses;
+    document.getElementById('statActiveLicenses').textContent = activeLicenses;
+    document.getElementById('statTotalExports').textContent = totalExports;
+    document.getElementById('statTotalTime').textContent = formatDuration(totalTimeSeconds);
+  }
+
   function renderKeys(list) {
     keysTableBody.innerHTML = '';
     keyCount.textContent = 'Licenses (' + list.length + ')';
     emptyState.style.display = list.length ? 'none' : 'block';
+    updateStatsBar(list);
 
     list.forEach(function (record) {
       var tr = document.createElement('tr');
