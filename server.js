@@ -26,6 +26,7 @@ const {
   trackExport,
   trackHeartbeat,
   getUsage,
+  getUsageTotals,
 } = require('./lib/store');
 
 const app = express();
@@ -145,11 +146,14 @@ app.get('/api/keys', async (req, res) => {
       const record = await getKeyRecord(key);
       const devices = await getDevices(key);
       const lastSeen = await getLastSeenMap(key);
+      const totals = await getUsageTotals(key);
       return {
         key,
         ...record,
         deviceCount: devices.length,
         devices: devices.map((id) => ({ deviceId: id, lastSeen: lastSeen[id] || null })),
+        totalExports: totals.exports,
+        totalTimeSeconds: totals.timeSeconds,
       };
     })
   );

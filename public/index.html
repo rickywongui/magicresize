@@ -126,6 +126,7 @@
               <th>Owner</th>
               <th>Status</th>
               <th>Devices</th>
+              <th>Total Usage</th>
               <th>Expires</th>
               <th>Actions</th>
             </tr>
@@ -264,11 +265,14 @@
         return d.deviceId.slice(0, 14) + '… (' + (d.lastSeen ? formatDate(d.lastSeen) : 'never') + ')';
       }).join('<br>');
 
+      var totalUsageLabel = (record.totalExports || 0) + ' exports<br>' + formatDuration(record.totalTimeSeconds || 0);
+
       tr.innerHTML =
         '<td class="key-code">' + record.key + '</td>' +
         '<td>' + (record.owner || '—') + '</td>' +
         '<td>' + statusBadge(record) + '</td>' +
         '<td class="devices-cell">' + deviceLabel + (deviceDetail ? '<br>' + deviceDetail : '') + '</td>' +
+        '<td class="devices-cell">' + totalUsageLabel + '</td>' +
         '<td>' + formatDate(record.expiresAt) + '</td>' +
         '<td class="row-actions"></td>';
 
