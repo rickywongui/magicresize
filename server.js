@@ -48,6 +48,13 @@ if (!LICENSE_TOKEN_SECRET) {
     'tokens, which means the plugin will treat every "valid" response as NOT ' +
     'licensed. Set this environment variable before deploying.'
   );
+} else {
+  // Prints a short fingerprint of the secret (never the secret itself) so a
+  // mismatch between this server and the plugin's code.js can be confirmed
+  // or ruled out just by comparing two short hex strings across two
+  // consoles — without ever exposing either actual secret value.
+  const fingerprint = crypto.createHash('sha256').update(LICENSE_TOKEN_SECRET).digest('hex').slice(0, 12);
+  console.log(`server.js LICENSE_TOKEN_SECRET fingerprint: ${fingerprint} (compare against code.js's own fingerprint log — they must match)`);
 }
 
 function base64url(buf) {
