@@ -206,6 +206,21 @@
       </div>
     </div>
 
+    <!-- Edit expiry modal -->
+    <div class="modal-backdrop hidden" id="editExpiryModal">
+      <div class="modal">
+        <h3 id="editExpiryModalTitle">Edit expiry</h3>
+        <div class="field">
+          <label>Expires (leave blank for no expiry)</label>
+          <input type="date" id="editExpiresAt" />
+        </div>
+        <div class="modal-actions">
+          <button class="btn-ghost" id="cancelEditExpiry">Cancel</button>
+          <button class="btn-primary" id="confirmEditExpiry">Save</button>
+        </div>
+      </div>
+    </div>
+
     <div class="toast" id="toast"></div>
 
     <script>
@@ -353,6 +368,12 @@
       usageBtn.onclick = function () { openUsageModal(record.key, record.owner); };
       actionsCell.appendChild(usageBtn);
 
+      var editExpiryBtn = document.createElement('button');
+      editExpiryBtn.className = 'btn-ghost btn-small';
+      editExpiryBtn.textContent = 'Edit expiry';
+      editExpiryBtn.onclick = function () { openEditExpiryModal(record.key, record.owner, record.expiresAt); };
+      actionsCell.appendChild(editExpiryBtn);
+
       var deleteBtn = document.createElement('button');
       deleteBtn.className = 'btn-danger btn-small';
       deleteBtn.textContent = 'Delete';
@@ -402,6 +423,48 @@
 
   document.getElementById('closeUsageModal').addEventListener('click', function () {
     usageModal.className = 'modal-backdrop hidden';
+  });
+
+  // ─── Edit expiry modal ──────────────────────────────────────────────────
+  var editExpiryModal = document.getElementById('editExpiryModal');
+  var editExpiryModalTitle = document.getElementById('editExpiryModalTitle');
+  var editExpiresAtInput = document.getElementById('editExpiresAt');
+  var editExpiryKey = null; // the license key currently being edited
+
+  // Converts a stored ISO timestamp to the yyyy-mm-dd format <input type="date">
+  // expects. Mirrors the same UTC-midnight convention used when CREATING a key
+  // (new Date('2026-03-01').toISOString()), so round-tripping an existing
+  // expiry through this modal without changing it doesn't silently shift it
+  // by a day in either direction.
+  function toDateInputValue(iso) {
+    if (!iso) return '';
+    return new Date(iso).toISOString().slice(0, 10);
+  }
+
+  function openEditExpiryModal(key, owner, expiresAt) {
+    editExpiryKey = key;
+    editExpiryModalTitle.textContent = 'Edit expiry — ' + (owner ? owner + ' (' + key + ')' : key);
+    editExpiresAtInput.value = toDateInputValue(expiresAt);
+    editExpiryModal.className = 'modal-backdrop';
+  }
+
+  document.getElementById('cancelEditExpiry').addEventListener('click', function () {
+    editExpiryModal.className = 'modal-backdrop hidden';
+  });
+
+  document.getElementById('confirmEditExpiry').addEventListener('click', function () {
+    var raw = editExpiresAtInput.value;
+    // An explicit null (not undefined) is what tells /api/keys to CLEAR the
+    // expiry — leaving the field blank and saving means "no expiry", not
+    // "leave whatever was there before" like the field being untouched would.
+    var expiresAt = raw ? new Date(raw).toISOString() : null;
+
+    api('/api/keys', { method: 'PATCH', body: { key: editExpiryKey, expiresAt: expiresAt } })
+      .then(function () {
+        editExpiryModal.className = 'modal-backdrop hidden';
+        showToast(expiresAt ? 'Expiry updated' : 'Expiry cleared');
+        loadKeys();
+      });
   });
 
   function loadKeys() {
