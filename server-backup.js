@@ -13,7 +13,6 @@
 
 const express = require('express');
 const path = require('path');
-const crypto = require('crypto');
 const {
   listKeys,
   getKeyRecord,
@@ -32,40 +31,6 @@ const {
 
 const app = express();
 app.use(express.json());
-
-// ─── License token signing ─────────────────────────────────────────────────
-// The Figma plugin's code.js sandbox can't make network calls, so it can't
-// re-verify a key against this server on every single action. Instead,
-// /api/verify signs a short-lived token here (once), and code.js checks the
-// signature itself — pure HMAC-SHA256 math, no network needed on that side.
-// This value MUST match LICENSE_TOKEN_SECRET in the plugin's code.js exactly,
-// or every token will fail to verify. Set via environment variable — never
-// hardcode this or commit it to a repo.
-const LICENSE_TOKEN_SECRET = process.env.LICENSE_TOKEN_SECRET || '';
-if (!LICENSE_TOKEN_SECRET) {
-  console.error(
-    '⚠️  LICENSE_TOKEN_SECRET is not set. /api/verify will refuse to issue signed ' +
-    'tokens, which means the plugin will treat every "valid" response as NOT ' +
-    'licensed. Set this environment variable before deploying.'
-  );
-}
-
-function base64url(buf) {
-  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-// Signs a token the plugin can verify itself. ttlSeconds should comfortably
-// exceed the plugin's recheck interval (currently 2 minutes) so a normal
-// recheck cycle always has a fresh, non-expired token by the time the old
-// one lapses. Returns null if LICENSE_TOKEN_SECRET isn't configured — callers
-// must treat that as a hard failure, not silently omit the token.
-function signLicenseToken(key, deviceId, ttlSeconds) {
-  if (!LICENSE_TOKEN_SECRET) return null;
-  const payload = { key, deviceId, exp: Math.floor(Date.now() / 1000) + ttlSeconds };
-  const payloadBuf = Buffer.from(JSON.stringify(payload), 'utf8');
-  const sig = crypto.createHmac('sha256', LICENSE_TOKEN_SECRET).update(payloadBuf).digest();
-  return base64url(payloadBuf) + '.' + base64url(sig);
-}
 
 // Allow the plugin (running from Figma's own origin) to call /api/verify.
 app.use((req, res, next) => {
@@ -122,29 +87,8 @@ app.post('/api/verify', async (req, res) => {
   if (isNewDevice) await addDevice(key, deviceId);
 
   const deviceCount = isNewDevice ? knownDevices.length + 1 : knownDevices.length;
-
-  // Token lifetime: 15 minutes by default, but never longer than the license
-  // itself has left — a signed token should never be able to outlive the
-  // license record it was issued for.
-  let ttlSeconds = 900;
-  if (record.expiresAt) {
-    const secUntilExpiry = Math.floor((new Date(record.expiresAt).getTime() - Date.now()) / 1000);
-    if (secUntilExpiry < ttlSeconds) ttlSeconds = Math.max(secUntilExpiry, 0);
-  }
-  const token = signLicenseToken(key, deviceId, ttlSeconds);
-
-  if (!token) {
-    // LICENSE_TOKEN_SECRET isn't configured on this deployment. The plugin's
-    // code.js now REQUIRES a verifiable token and treats "valid but no
-    // token" as not licensed — so surface this loudly as a real server
-    // error instead of quietly returning valid:true with nothing usable.
-    console.error('Cannot issue a license token: LICENSE_TOKEN_SECRET is not configured.');
-    return res.status(500).json({ valid: false, reason: 'server_misconfigured' });
-  }
-
   res.status(200).json({
     valid: true,
-    token,
     owner: record.owner || null,
     expiresAt: record.expiresAt || null,
     deviceCount,
