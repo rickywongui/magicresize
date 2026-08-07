@@ -1,0 +1,11 @@
+{
+  "name": "magic-resizer-obfuscate-build",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "node build-obfuscated.js"
+  },
+  "dependencies": {
+    "javascript-obfuscator": "^5.4.6"
+  }
+}
