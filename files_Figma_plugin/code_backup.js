@@ -29,8 +29,72 @@ function extractVariantSize(v) {
 
 
 console.log("=== BANNER RESIZER v4 LOADED ===");
+var _stopRequested = false;
+var _pauseRequested = false;
+// Holds the state needed to resume a paused batch: { sel, sizes, startIndex, maxPerRow,
+// retailerBreak, batchRow1Y, prevCol1, retailerRowFloorY, done, errors }. Null when no
+// batch is paused.
+var _pausedBatch = null;
+// Holds the state needed to resume a paused export: { tasks, format, scale, startIndex,
+// done, total }. Null when no export is paused.
+var _pausedExport = null;
+// Holds the state needed to resume a paused translate: { sourcePageId, sourceRows,
+// languages, mappings, rows, sizeRules, selectedSizes, total, startIndex, done }.
+// Null when no translate run is paused.
+var _pausedTranslate = null;
+// Resolves the Promise returned by askTranslateCollisionChoice below, once the UI
+// sends back TRANSLATE_COLLISION_RESOLVED with the user's decision.
+var _pendingCollisionResolve = null;
+function askTranslateCollisionChoice(frameName, lang) {
+  return new Promise(function (resolve) {
+    _pendingCollisionResolve = resolve;
+    figma.ui.postMessage({ type: "TRANSLATE_COLLISION", frameName: frameName, lang: lang });
+  });
+}
+// Tracks the most recently batch-processed template package so a NEW template
+// (a different template selected from the dropdown, OR a different physical master
+// frame) can be chained immediately to the right of the previous package.
+// IMPORTANT: templates are variant swaps inside the SAME frame (see SELECT_TEMPLATE) —
+// the frame's id never changes between templates, so identity must include the
+// currently selected variant name, not just the frame id.
+// Reset naturally each time the plugin is reopened.
+var _lastPackageKey = null;      // "<frameId>::<variantName>" for the last package
+var _lastPackageRightX = null;   // rightmost edge (x + width) reached by the last package
+var _lastPackageBaselineY = null; // the row1 Y used for the last package, so new packages align to it
 
 figma.showUI(__html__, { width: 340, height: 480, title: "Banner Resizer" });
+
+// ─── Persistent storage bridge ─────────────────────────────────────────────
+// figma.clientStorage lives here in the plugin sandbox and persists reliably
+// per-user-per-plugin, unaffected by whatever restricts localStorage in the
+// UI iframe on some setups. ui.html can't call this directly, so we read it
+// on startup and hand the values over via postMessage, then save back
+// whatever ui.html tells us to.
+Promise.all([
+  figma.clientStorage.getAsync("mr-device-id"),
+  figma.clientStorage.getAsync("mr-license-key")
+]).then(function (values) {
+  figma.ui.postMessage({
+    type: "STORAGE_INIT",
+    deviceId: values[0] || null,
+    licenseKey: values[1] || null
+  });
+});
+
+// ─── License gate ──────────────────────────────────────────────────────────
+// The actual network call happens in ui.html (the sandbox here can't call
+// fetch). This flag just reflects what the UI reported, and gates the
+// value-producing actions below. See LICENSED_ACTIONS.
+var licenseValid = false;
+
+// Only these actions require a valid license. Read-only/info messages
+// (GET_TEMPLATES, GET_MASTER_INFO, SELECT_TEMPLATE, etc.) stay open so
+// people can preview the plugin before unlocking it.
+var LICENSED_ACTIONS = ["RESIZE_BANNER", "BATCH_RESIZE", "CONTINUE_BATCH", "TRANSLATE_BANNERS", "CONTINUE_TRANSLATE", "EXPORT_BANNERS", "CONTINUE_EXPORT"];
+
+function requiresLicense(type) {
+  return LICENSED_ACTIONS.indexOf(type) !== -1;
+}
 
 // ─── Get selected frame ───────────────────────────────────────────────────────
 
@@ -108,6 +172,7 @@ async function swapBestVariant(clone, newW, newH, ryLtRx) {
           var best = null; var bestDiff = Infinity;
           var bestOrientation = null; var bestOrientationDiff = Infinity;
           var squareVariant = null;
+          var globalBest = null; var globalBestDiff = Infinity;
 
           for (var j = 0; j < cs.children.length; j++) {
             var v = cs.children[j];
@@ -119,6 +184,11 @@ async function swapBestVariant(clone, newW, newH, ryLtRx) {
             var isSquare = (vW === vH);
             var isPortraitVariant = vH > vW;
             console.log("  variant: " + v.name + " parsed=" + vW + "x" + vH + " isSquare=" + isSquare + " isPortrait=" + isPortraitVariant + " diff=" + diff.toFixed(3));
+
+            // Track the closest-fitting variant overall, regardless of orientation/square —
+            // this is our fallback so we never pick a wildly-mismatched aspect ratio just
+            // because it happens to share the target's orientation
+            if (diff < globalBestDiff) { globalBestDiff = diff; globalBest = v; }
 
             // Detect square variant
             if (isSquare) squareVariant = v;
@@ -144,11 +214,20 @@ async function swapBestVariant(clone, newW, newH, ryLtRx) {
           }
 
           // For nearly-square: always prefer square if available
+          // Otherwise: only trust an orientation match if it's not a drastically worse
+          // aspect-ratio fit than the closest variant overall (square included). A same-
+          // orientation variant whose ratio is way off (e.g. a 7.9:1 banner for a 1.3:1
+          // target) should lose to a square/other variant that actually fits the shape.
+          var ORIENTATION_TOLERANCE = 1.6;
           var chosen;
           if (isNearlySquare && squareVariant) {
             chosen = squareVariant;
+          } else if (bestOrientation && bestOrientationDiff <= globalBestDiff * ORIENTATION_TOLERANCE) {
+            chosen = bestOrientation;
+          } else if (preferSquare && squareVariant) {
+            chosen = squareVariant;
           } else {
-            chosen = (preferSquare && squareVariant && !bestOrientation) ? squareVariant : (bestOrientation || best);
+            chosen = globalBest || best;
           }
           console.log("Swap decision: target=" + newW + "x" + newH + " portrait=" + targetIsPortrait + " preferSquare=" + preferSquare + " bestOrientation=" + (bestOrientation ? bestOrientation.name : "null") + " best=" + (best ? best.name : "null") + " chosen=" + (chosen ? chosen.name : "null"));
           if (chosen) {
@@ -270,11 +349,11 @@ function calcNewValues(map, rx, ry, ratio) {
     n.strokeWeight = d.strokeWeight !== null ? Math.max(0.01, d.strokeWeight * ratio) : null;
     // Text
     n.fontSize = d.fontSize !== null
-      ? Math.max(1, Math.round(d.fontSize * textRatio))
+      ? Math.max(10, Math.round(d.fontSize * textRatio))
       : null;
 
     n.lineHeight = d.lineHeight !== null
-      ? Math.max(1, Math.round(d.lineHeight * textRatio))
+      ? Math.max(14, Math.round(d.lineHeight * textRatio))
       : null;
 
     n.letterSpacing = d.letterSpacing !== null
@@ -316,22 +395,50 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
       }
     }
     var isFullSizeFrame = (Math.round(old.width) === Math.round(oldParentW) && Math.round(old.height) === Math.round(oldParentH));
-    if ((hasImageFill || isFullSizeFrame) && child.type !== "GROUP" && child.type !== "TEXT" && child.type !== "BOOLEAN_OPERATION" && child.type !== "VECTOR") {
+    // A "bg" layer with an image fill needs the crop-preserving logic below even when
+    // it's a VECTOR/BOOLEAN_OPERATION — which is exactly what Figma turns it into once
+    // it's been Flattened. Without this, a flattened bg fell through to the generic
+    // resize path further down, which does a plain non-uniform child.resize(), stretching
+    // the image independently in X and Y instead of preserving its aspect ratio.
+    var isBgImage = hasImageFill && child.name.toLowerCase() === "bg";
+    if (isBgImage || ((hasImageFill || isFullSizeFrame) && child.type !== "GROUP" && child.type !== "TEXT" && child.type !== "BOOLEAN_OPERATION" && child.type !== "VECTOR")) {
       try { child.unlockAspectRatio(); } catch (_) { }
       if (hasImageFill && child.name.toLowerCase() === "bg") {
         try {
           var bgW = (rootTargetW && rootTargetW > 0) ? Math.round(rootTargetW) : Math.round(newParentW);
           var bgH = (rootTargetH && rootTargetH > 0) ? Math.round(rootTargetH) : Math.round(newParentH);
-          var origRatio = old.width / old.height;
-          var bannerRatio = bgW / bgH;
-          var newImgW, newImgH;
-          if (origRatio > bannerRatio) {
-            newImgH = bgH;
-            newImgW = Math.round(newImgH * origRatio);
-          } else {
-            newImgW = bgW;
-            newImgH = Math.round(newImgW / origRatio);
+
+          // The bg layer is always force-resized to exactly fill its parent banner,
+          // so old.width/old.height is the BANNER's box ratio, not the underlying
+          // image's true ratio — those only match if the original needed zero
+          // cropping. Whenever the swapped-in starting variant's own crop already
+          // needed to cut into the image (the normal case), this approximation is
+          // wrong by an amount that varies per target size — which is exactly why
+          // some sizes came out looking fine and others looked squished/stretched.
+          // Ask Figma for the image's real pixel dimensions instead of guessing.
+          var origRatio = old.width / old.height; // fallback if lookup below fails
+          var bgFirstImageFill = null;
+          if (child.fills && child.fills !== figma.mixed) {
+            for (var bgfi = 0; bgfi < child.fills.length; bgfi++) {
+              if (child.fills[bgfi].type === "IMAGE" && child.fills[bgfi].imageHash) { bgFirstImageFill = child.fills[bgfi]; break; }
+            }
           }
+          if (bgFirstImageFill) {
+            try {
+              var bgSrcImg = figma.getImageByHash(bgFirstImageFill.imageHash);
+              if (bgSrcImg) {
+                var bgSrcSize = await bgSrcImg.getSizeAsync();
+                if (bgSrcSize && bgSrcSize.width > 0 && bgSrcSize.height > 0) {
+                  origRatio = bgSrcSize.width / bgSrcSize.height;
+                  console.log("[bg] true image size=" + bgSrcSize.width + "x" + bgSrcSize.height + " ratio=" + origRatio.toFixed(4) + " (banner-box ratio would have been " + (old.width / old.height).toFixed(4) + ")");
+                }
+              }
+            } catch (bgImgErr) {
+              console.log("[bg] could not read true image size, falling back to banner-box ratio: " + bgImgErr.message);
+            }
+          }
+
+          var bannerRatio = bgW / bgH;
 
           // Snapshot imageTransform BEFORE any resize mutates it
           var bgFillsSnap = (child.fills && child.fills !== figma.mixed)
@@ -340,8 +447,26 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
 
 
           if (bgFillsSnap && child.fills && child.fills !== figma.mixed) {
-            var moveWidth = (newImgW - bgW) / newImgW;
-            var moveHeight = (newImgH - bgH) / newImgH;
+            // Clamp so a mapped crop window never samples outside the image's
+            // valid [0,1] bounds — but only when both coefficients are within
+            // [-1,1] (a genuine "zoomed in" crop, showing a fraction of the image).
+            // If either exceeds 1 in magnitude, the image is legitimately displayed
+            // SMALLER than the shape (zoomed out, with padding) — confirmed against
+            // a real hand-edited target — so there's no "outside the image" concern
+            // to guard against; any offset is valid in that regime.
+            function clampAxisOffset(off, coef1, coef2) {
+              if (Math.abs(coef1) > 1 || Math.abs(coef2) > 1) return off;
+              var lo = -(Math.min(0, coef1) + Math.min(0, coef2));
+              var hi = 1 - (Math.max(0, coef1) + Math.max(0, coef2));
+              if (lo > hi) { var tmp = lo; lo = hi; hi = tmp; }
+              return Math.max(lo, Math.min(off, hi));
+            }
+
+            // Defaults: fill the banner exactly (the plain, non-rotated case).
+            // A rotated crop overrides these below to instead size the LAYER
+            // itself to match the image's own true (rotated) aspect ratio —
+            // see explanation further down.
+            var nodeW = bgW, nodeH = bgH, nodeX = 0, nodeY = 0;
 
             // Calculate new tx/ty and build FILL fills list
             var bgTransforms = [];
@@ -358,34 +483,191 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
               var origTy = t[1][2];
               var origA = t[0][0];
               var origD = t[1][1];
+              var origB = t[0][1];
+              var origC = t[1][0];
 
-              // Formula: keep same display scale (pixels per image-pixel) on new layer.
-              // origA was calibrated for newImgW (cover-fit size e.g. 2200).
-              // New layer is bgW (canvas size e.g. 1200).
-              // a_new = origA \u00D7 (bgW / newImgW) → 0.984 \u00D7 (1200/2200) = 0.537
-              // d_new = origD \u00D7 (bgH / newImgH) → 0.455 \u00D7 (1000/1000) = 0.455
-              // Both axes covered (< 1), same display scale, no distortion.
-              var newA = origA * (bgW / newImgW);
-              var newD = origD * (bgH / newImgH);
+              // Detect genuine ~90/270° rotation (e.g. a landscape photo rotated
+              // to reorient it for a portrait banner) vs. the plain axis-aligned
+              // case (which also covers simple flips — a negative origA/origD
+              // with origB/origC ~0). Real-world rotations from the image fill's
+              // "rotate" control are essentially always orthogonal (0/90/180/270),
+              // so we snap to the nearest of those rather than handling arbitrary
+              // angles, which is both simpler and matches how this is actually used.
+              var rawTheta = Math.atan2(origC, origA);
+              var snappedDeg = Math.round((rawTheta * 180 / Math.PI) / 90) * 90;
+              var isRotatedCrop = Math.abs(snappedDeg) === 90;
+              var sgn = function (v, fallback) { return v < 0 ? -1 : (v > 0 ? 1 : fallback); };
 
-              var newTx = origTx;
-              var newTy = origTy;
-              if (moveWidth !== 0) newTx = origTx + moveWidth / 2;
-              if (moveHeight !== 0) newTy = origTy + moveHeight / 2;
+              // Even when the crop has a baked-in ~90/270° rotation, that
+              // rotation was set up to make a landscape photo look right in a
+              // PORTRAIT-shaped output — it doesn't make sense to keep applying
+              // it to a very differently-shaped target (e.g. a wide leaderboard
+              // banner), where the photo is already natively oriented correctly
+              // without any rotation. Decide by checking which orientation
+              // (rotated vs. the image's natural orientation) actually needs LESS
+              // extreme cropping to fit this specific banner, rather than
+              // assuming a rotation should always be preserved once it exists.
+              var applyRotation = isRotatedCrop;
+              if (isRotatedCrop) {
+                var distRotated = Math.abs(Math.log((1 / origRatio) / bannerRatio));
+                var distNatural = Math.abs(Math.log(origRatio / bannerRatio));
+                applyRotation = distRotated < distNatural;
+                if (!applyRotation) {
+                  console.log("[bg] crop has a " + snappedDeg + "deg rotation, but the image's natural (unrotated) orientation fits this " + bgW + "x" + bgH + " banner much better — ignoring the rotation for this size.");
+                }
+              }
 
-              bgTransforms.push({ newA: newA, newD: newD, newTx: newTx, newTy: newTy, t: t });
-              console.log("[bg] a=" + origA.toFixed(4) + "→" + newA.toFixed(4) + " d=" + origD.toFixed(4) + "→" + newD.toFixed(4) + " tx=" + origTx.toFixed(4) + "→" + newTx.toFixed(4) + " ty=" + origTy.toFixed(4) + "→" + newTy.toFixed(4));
+              var newA, newB, newC, newD, newTx, newTy;
 
-              // Step 1: resize to canvas size, set to FILL to reset Figma state
-              child.resize(bgW, bgH);
-              child.x = 0;
-              child.y = 0;
+              if (applyRotation) {
+                // bg always stays exactly at the banner's own size — the zoom
+                // is achieved entirely through the image transform's magnitude
+                // (a PARTIAL crop), never by resizing the layer itself.
+                //
+                // For a rotated crop (a≈0, d≈0), the matrix is P=b*v+tx, Q=c*u+
+                // ty — so 'b' governs how the SHAPE's height (v) axis maps into
+                // the image, and 'c' governs how the SHAPE's width (u) axis maps
+                // into the image. Working through the actual no-distortion
+                // requirement (verified against a same-ratio test case, where
+                // these should come out completely unchanged but instead came
+                // out swapped) shows |origC|/|origB| must equal bannerRatio/
+                // effImgRatio — i.e. origC plays the "numerator/width-like" role
+                // and origB the "denominator/height-like" role, the OPPOSITE of
+                // what's naturally assumed from their letter order. An earlier
+                // attempt at this same partial-crop approach produced visible
+                // stretching — verified afterward that this exact axis mix-up was
+                // the cause (the resulting selected-region ratio was the precise
+                // INVERSE of what the banner needed), not a Figma limitation.
+                //
+                // IMPORTANT: values >1 here are VALID — they just mean the image
+                // is displayed SMALLER than the shape (zoomed out, with padding
+                // on the sides), not an error to clamp away. Confirmed directly
+                // against a hand-edited target from the user: our unclamped
+                // "ideal" formula output matched their desired crop far more
+                // closely than the previous clamp-to-1.0 version did, while both
+                // satisfy the same no-distortion ratio — so the clamping itself
+                // was the bug, not the formula.
+                var effImgRatio = 1 / origRatio; // ratio as actually displayed, post-rotation
+                var effA = Math.max(Math.abs(origC), 0.0001);
+                var effD = Math.max(Math.abs(origB), 0.0001);
+                var kRot = Math.sqrt(effA * effD);
+                var newEffA = kRot * Math.sqrt(bannerRatio / effImgRatio);
+                var newEffD = kRot * Math.sqrt(effImgRatio / bannerRatio);
+                // newC carries the "effA/width-like" role, newB the "effD/
+                // height-like" role — matching the origC/origB assignment above.
+                newA = 0;
+                newD = 0;
+                newC = newEffA * sgn(origC, 1);
+                newB = newEffD * sgn(origB, -1);
+
+                // Preserve the shape's center point mapping to the same spot in
+                // image space (the crop's true focal point) — general formula,
+                // valid regardless of rotation.
+                var centerXRot = (origA + origB) / 2 + origTx;
+                var centerYRot = (origC + origD) / 2 + origTy;
+                newTx = centerXRot - (newA + newB) / 2;
+                newTy = centerYRot - (newC + newD) / 2;
+
+                // Clamp so the mapped window never samples outside the image's
+                // valid [0,1] bounds.
+                var clampedTxRot = clampAxisOffset(newTx, newA, newB);
+                var clampedTyRot = clampAxisOffset(newTy, newC, newD);
+                if (clampedTxRot !== newTx || clampedTyRot !== newTy) {
+                  console.log("[bg] clamped out-of-bounds offset (rotated): tx=" + newTx.toFixed(4) + "→" + clampedTxRot.toFixed(4) + " ty=" + newTy.toFixed(4) + "→" + clampedTyRot.toFixed(4));
+                }
+                newTx = clampedTxRot;
+                newTy = clampedTyRot;
+
+                // Standard sizing — bg is always exactly the banner's own size.
+                nodeW = bgW; nodeH = bgH; nodeX = 0; nodeY = 0;
+
+                console.log("[bg] rotated crop (" + snappedDeg + "deg): effA=" + effA.toFixed(4) + "→" + newEffA.toFixed(4) + " effD=" + effD.toFixed(4) + "→" + newEffD.toFixed(4));
+              } else if (isRotatedCrop) {
+                // Rotation exists but doesn't suit this target's shape (e.g. a
+                // wide banner when the rotation was meant for portrait) — treat
+                // this as a fresh crop from the image's NATURAL (unrotated)
+                // orientation instead. Not trying to preserve the rotated crop's
+                // specific zoom level here, since a zoom chosen for a completely
+                // different orientation doesn't meaningfully translate anyway —
+                // just a plain, centered, minimum cover-fit.
+                if (origRatio > bannerRatio) {
+                  newD = 1;
+                  newA = bannerRatio / origRatio;
+                } else {
+                  newA = 1;
+                  newD = origRatio / bannerRatio;
+                }
+                newB = 0;
+                newC = 0;
+                newTx = (1 - newA) / 2;
+                newTy = (1 - newD) / 2;
+                nodeW = bgW; nodeH = bgH; nodeX = 0; nodeY = 0;
+              } else {
+                // Plain axis-aligned case (includes simple flips). The "no
+                // distortion" condition (visible-width-fraction/visible-height-
+                // fraction = shapeRatio/imageRatio) lets us preserve the crop's
+                // zoom level (k = sqrt(|a|*|d|)) while adapting to the new
+                // banner's own ratio — sign-safe, so a flip (negative a or d)
+                // is preserved rather than lost.
+                //
+                // IMPORTANT: values >1 are VALID in Figma — they mean the image
+                // is displayed SMALLER than the shape (zoomed out, with padding
+                // on the sides), not an error. This was previously clamped to a
+                // maximum of 1, which was based on a wrong assumption; verified
+                // directly against a hand-edited target from the user that the
+                // unclamped "ideal" value here matches their desired crop far
+                // more closely than the clamped version did, while both satisfy
+                // the same no-distortion ratio (idealA/idealD always equals
+                // bannerRatio/origRatio) — so the clamping itself was the bug.
+                var effA2 = Math.max(Math.abs(origA), 0.0001);
+                var effD2 = Math.max(Math.abs(origD), 0.0001);
+                var kPlain = Math.sqrt(effA2 * effD2);
+                newA = kPlain * Math.sqrt(bannerRatio / origRatio);
+                newD = kPlain * Math.sqrt(origRatio / bannerRatio);
+                newA *= sgn(origA, 1);
+                newD *= sgn(origD, 1);
+                newB = origB;
+                newC = origC;
+
+                // Preserve the shape's center point (0.5, 0.5) mapping to the
+                // same spot in image space — the crop's true focal point.
+                var centerX = (origA + origB) / 2 + origTx;
+                var centerY = (origC + origD) / 2 + origTy;
+                newTx = centerX - (newA + newB) / 2;
+                newTy = centerY - (newC + newD) / 2;
+
+                // Clamp so the mapped window never samples outside the image's
+                // valid [0,1] bounds.
+                var clampedTx = clampAxisOffset(newTx, newA, newB);
+                var clampedTy = clampAxisOffset(newTy, newC, newD);
+                if (clampedTx !== newTx || clampedTy !== newTy) {
+                  console.log("[bg] clamped out-of-bounds offset: tx=" + newTx.toFixed(4) + "→" + clampedTx.toFixed(4) + " ty=" + newTy.toFixed(4) + "→" + clampedTy.toFixed(4));
+                }
+                newTx = clampedTx;
+                newTy = clampedTy;
+              }
+
+              bgTransforms.push({ newA: newA, newB: newB, newC: newC, newD: newD, newTx: newTx, newTy: newTy, t: t });
+              console.log("[bg] a=" + origA.toFixed(4) + "→" + newA.toFixed(4) + " b=" + origB.toFixed(4) + "→" + newB.toFixed(4) + " c=" + origC.toFixed(4) + "→" + newC.toFixed(4) + " d=" + origD.toFixed(4) + "→" + newD.toFixed(4) + " tx=" + origTx.toFixed(4) + "→" + newTx.toFixed(4) + " ty=" + origTy.toFixed(4) + "→" + newTy.toFixed(4));
 
               var fillVersion = Object.assign({}, sf);
               fillVersion.scaleMode = "FILL";
               delete fillVersion.imageTransform;
               fillFills.push(fillVersion);
             }
+
+            // Step 1: resize/reposition the layer — normally exactly the banner
+            // size at (0,0); for a rotated crop, sized/centered to match the
+            // image's true ratio instead (see above), overflowing on one axis for
+            // the parent frame's clipping to crop automatically.
+            child.resize(Math.round(nodeW), Math.round(nodeH));
+            child.x = Math.round(nodeX);
+            child.y = Math.round(nodeY);
+            // Lock bg's own sizing-as-a-child to FIXED, as a defensive measure —
+            // harmless if bg's parent isn't auto-layout, and prevents any future
+            // "Fill" auto-layout constraint from resizing bg independently of us.
+            try { if (child.layoutSizingHorizontal !== undefined) child.layoutSizingHorizontal = "FIXED"; } catch (_) { }
+            try { if (child.layoutSizingVertical !== undefined) child.layoutSizingVertical = "FIXED"; } catch (_) { }
 
             // Step 2: apply FILL to reset Figma internal state
             child.fills = fillFills;
@@ -402,15 +684,16 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
               var cropFill = Object.assign({}, cropFills[fi2]);
               cropFill.scaleMode = "CROP";
               cropFill.imageTransform = [
-                [tr.newA, tr.t[0][1], tr.newTx],
-                [tr.t[1][0], tr.newD, tr.newTy]
+                [tr.newA, tr.newB, tr.newTx],
+                [tr.newC, tr.newD, tr.newTy]
               ];
               cropFills[fi2] = cropFill;
             }
             child.fills = cropFills;
 
-            // bg stays at exact canvas size — imageTransform handles crop/position
-            console.log("[bg] FILL→CROP done: canvas=" + bgW + "x" + bgH + " x=0 y=0");
+            // bg stays at exact canvas size (or matched-ratio size for a rotated
+            // crop) — imageTransform handles crop/position
+            console.log("[bg] FILL→CROP done: canvas=" + bgW + "x" + bgH + " intended=" + Math.round(nodeW) + "x" + Math.round(nodeH) + " ACTUAL=" + Math.round(child.width) + "x" + Math.round(child.height) + " at (" + Math.round(nodeX) + "," + Math.round(nodeY) + ")");
           }
         } catch (e) { console.error("[bg] resize/transform failed:", e); }
       } else {
@@ -441,7 +724,18 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
       var h = old.constraints.h;
       var v = old.constraints.v;
 
-      if (h === "MIN" || h === "SCALE") {
+      var TOL = 1.5;
+      var isPinnedLeft = old.x <= TOL;
+      var isPinnedRight = (old.x + old.width) >= (oldParentW - TOL);
+      var isPinnedTop = old.y <= TOL;
+      var isPinnedBottom = (old.y + old.height) >= (oldParentH - TOL);
+      var isFullWidth = isPinnedLeft && isPinnedRight && Math.abs(old.width - oldParentW) <= TOL;
+      var isFullHeight = isPinnedTop && isPinnedBottom && Math.abs(old.height - oldParentH) <= TOL;
+
+      // X position
+      if (isFullWidth) {
+        try { child.x = 0; } catch (e) { }
+      } else if (h === "MIN" || h === "SCALE") {
         try { child.x = Math.round(old.x / oldParentW * newParentW); } catch (e) { }
       } else if (h === "MAX") {
         var dfr = oldParentW - old.x - old.width;
@@ -451,8 +745,14 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
         try { child.x = Math.round(oldCenterX / oldParentW * newParentW - child.width / 2); } catch (e) { }
       }
 
-      // Apply Y position — map proportionally to actual new frame height
-      if (v === "MIN" || v === "SCALE") {
+      // Y position
+      if (isFullHeight) {
+        try { child.y = 0; } catch (e) { }
+      } else if (isPinnedBottom && !isPinnedTop) {
+        try { child.y = Math.round(newParentH) - Math.round(child.height); } catch (e) { }
+      } else if (isPinnedTop) {
+        try { child.y = 0; } catch (e) { }
+      } else if (v === "MIN" || v === "SCALE") {
         try { child.y = Math.round(old.y / oldParentH * newParentH); } catch (e) { }
       } else if (v === "MAX") {
         var dfb = oldParentH - old.y - old.height;
@@ -526,19 +826,30 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
 
     // Restore attributes in correct order:
     // 1. Aspect ratio lock first — must be before HUG/FILL so sizing respects the lock
-    try { if (old.constrainProportions) { try { child.lockAspectRatio(old.width / old.height); } catch (_) { } }; } catch (_) { }
+    // bg is excluded here for the same reason it's excluded from the HUG/FILL restore
+    // below: its size is deliberately set to exactly match the banner in applyAllData
+    // above, and lockAspectRatio() can immediately force a node to conform to the
+    // locked ratio by adjusting its CURRENT dimensions — which would silently resize bg
+    // again right after we carefully set it, using bg's OLD (pre-resize) ratio instead
+    // of the banner's own ratio. This is exactly what caused bg to end up larger than
+    // the banner despite our crop logic explicitly setting it to the banner's size.
+    var isBgLayer = false;
+    try { isBgLayer = child.name && child.name.toLowerCase() === "bg"; } catch (_) { }
+    try { if (!isBgLayer && old.constrainProportions) { try { child.lockAspectRatio(old.width / old.height); } catch (_) { } }; } catch (_) { }
 
-    // 2. HUG sizing — wraps content, safe to always restore
+    // 2. HUG sizing — wraps content, safe to always restore (except bg, same reasoning as above)
     try {
-      if (old.layoutSizingH === "HUG") child.layoutSizingHorizontal = "HUG";
-      if (old.layoutSizingV === "HUG") child.layoutSizingVertical = "HUG";
+      if (!isBgLayer) {
+        if (old.layoutSizingH === "HUG") child.layoutSizingHorizontal = "HUG";
+        if (old.layoutSizingV === "HUG") child.layoutSizingVertical = "HUG";
+      }
     } catch (_) { }
 
-    // 3. FILL sizing — only for auto layout children (not absolute), never for Boolean/Union, Logo, or Union-parent
+    // 3. FILL sizing — only for auto layout children (not absolute), never for Boolean/Union, Logo, Union-parent, or bg
     try {
       var isLogoNode = child.name.toLowerCase().indexOf("logo") !== -1;
       var isUnionParent = hasUnionChild(child);
-      if (parentIsAutoLayout && !childIsAbsolute && child.type !== "BOOLEAN_OPERATION" && child.type !== "VECTOR" && !isLogoNode && !isUnionParent) {
+      if (!isBgLayer && parentIsAutoLayout && !childIsAbsolute && child.type !== "BOOLEAN_OPERATION" && child.type !== "VECTOR" && !isLogoNode && !isUnionParent) {
         if (old.layoutSizingH === "FILL") child.layoutSizingHorizontal = "FILL";
         if (old.layoutSizingV === "FILL") child.layoutSizingVertical = "FILL";
       }
@@ -562,7 +873,7 @@ async function applyAllData(node, oldMap, newMap, rx, ry, oldParentW, oldParentH
 
 // ─── Main flow ────────────────────────────────────────────────────────────────
 
-async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRow, col1) {
+async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRow, col1, forceNewRow, rowFloorY, anchorX) {
   var oldW = master.width;
   var oldH = master.height;
   var ratioX = newW / oldW;
@@ -580,7 +891,13 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
   var GAP = 60;
   var MAX_PER_ROW = (maxPerRow && maxPerRow > 0) ? maxPerRow : 6;
   var page = figma.currentPage;
-  var firstCreatedX = master.x + master.width + GAP;
+  // anchorX overrides the normal "just right of this master" starting point — used to
+  // chain a new template's package immediately to the right of a previous template's
+  // whole package, regardless of where this master itself sits on the canvas.
+  var firstCreatedX = (anchorX != null) ? anchorX : (master.x + master.width + GAP);
+  // Reference X used to decide which existing frames on the page belong to THIS
+  // package (mirrors firstCreatedX so sibling-detection stays consistent with the override).
+  var packageRightEdgeRef = (anchorX != null) ? (anchorX - GAP) : (master.x + master.width);
 
   // Initial position — final position set after processing
   clone.x = firstCreatedX;
@@ -665,15 +982,11 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
     return best;
   }
 
-
-  var contentFrame = findContentFrame(
-    clone,
-    swappedVariant.w,
-    swappedVariant.h
-  );
-
-  if (!contentFrame)
-    contentFrame = clone;
+  // Used ONLY as a fallback dimension source below (when the variant name can't be
+  // parsed) — must NOT replace contentFrame itself, or only that nested frame gets
+  // resized/renamed/positioned while the actual outer banner frame (clone) is left at
+  // its stale pre-swap size, which is the bug this comment used to warn about above.
+  var matchedInnerFrame = swappedVariant ? findContentFrame(clone, swappedVariant.w, swappedVariant.h) : null;
 
   // Use swapped variant name-parsed dimensions as actualOldW/H
   // contentFrame.width/height stays at master wrapper size after swapComponent
@@ -682,6 +995,10 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
     actualOldW = swappedVariant.w;
     actualOldH = swappedVariant.h;
     console.log("[actualOldW/H] from swapped variant name: " + actualOldW + "x" + actualOldH);
+  } else if (matchedInnerFrame) {
+    actualOldW = Math.round(matchedInnerFrame.width);
+    actualOldH = Math.round(matchedInnerFrame.height);
+    console.log("[actualOldW/H] from matched inner frame: " + actualOldW + "x" + actualOldH);
   } else {
     actualOldW = Math.round(contentFrame.width);
     actualOldH = Math.round(contentFrame.height);
@@ -719,8 +1036,33 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
   // PHASE 2: Calculate ALL new values based on ratio
   var newDataMap = calcNewValues(oldDataMap, ratioX, ratioY, ratio);
 
+  // If contentFrame is ITSELF an auto-layout frame set to "Hug contents" on either axis
+  // (primaryAxisSizingMode/counterAxisSizingMode = "AUTO"), calling resize() below would
+  // get silently overridden right back to fit its current (still full-size, not-yet-
+  // shrunk) children — since the children aren't scaled down until Phase 3 below. Force
+  // it to FIXED first so the resize actually holds.
+  console.log("[contentFrame self-sizing] layoutMode=" + contentFrame.layoutMode + " primaryAxisSizingMode=" + contentFrame.primaryAxisSizingMode + " counterAxisSizingMode=" + contentFrame.counterAxisSizingMode);
+  if (contentFrame.layoutMode && contentFrame.layoutMode !== "NONE") {
+    try {
+      var cfWasLocked = contentFrame.locked;
+      if (cfWasLocked) contentFrame.locked = false;
+      if (contentFrame.primaryAxisSizingMode !== undefined) contentFrame.primaryAxisSizingMode = "FIXED";
+      if (contentFrame.counterAxisSizingMode !== undefined) contentFrame.counterAxisSizingMode = "FIXED";
+      if (cfWasLocked) contentFrame.locked = true;
+      console.log("[contentFrame self-sizing] forced to FIXED before resize");
+    } catch (e) { console.log("[contentFrame self-sizing] FAILED to force FIXED: " + e.message); }
+  }
+
   // 5. Resize the content frame
   contentFrame.resize(newW, newH);
+  // Always clip contents to the frame's own bounds. Text/CTA containers are set to
+  // "Hug contents" further down so wrapped text can grow — without clipping, a longer
+  // translated string can make those containers overflow past this frame's edge and
+  // visually bleed into the next row/package, even though this frame's own x/y and
+  // size are correct. This also carries over to translated clones automatically,
+  // since clone() preserves this property.
+  try { contentFrame.clipsContent = true; } catch (e) { console.log("[clip] failed: " + e.message); }
+  console.log("[contentFrame self-sizing] after resize: w=" + contentFrame.width + " h=" + contentFrame.height);
   // Name: build from variant name template
   // - Strip "Property 1=" prefix
   // - Replace size with new size
@@ -761,6 +1103,14 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
     var s = hugSnap[i];
     try { if (!s.node || !s.node.id) continue; } catch (_) { continue; }
     if (s.node.id === contentFrame.id) continue;
+    // bg is deliberately given an exact size in applyAllData above — including being
+    // made intentionally LARGER than the banner for a rotated crop, relying on the
+    // parent's clipping to crop the overflow. If bg's original layoutSizingVertical/
+    // Horizontal was "FILL" (extremely common for a background image), restoring that
+    // here would make it immediately snap back to match its actual container size,
+    // silently discarding our sizing while leaving the crop transform (calibrated for
+    // the size we set) unchanged — showing the wrong portion/zoom of the image.
+    try { if (s.node.name && s.node.name.toLowerCase() === "bg") continue; } catch (_) { }
     if (s.h !== "HUG" && s.h !== "FILL" && s.v !== "HUG" && s.v !== "FILL") continue;
     try {
       var wasLocked = false;
@@ -781,39 +1131,6 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
       }
       if (wasLocked) { try { s.node.locked = true; } catch (_) { } }
     } catch (_) { }
-  }
-
-  // ── SET CTA AND ALL CHILDREN TO HUG H+V ─────────────────────────────────────
-  // Run after hugSnap so any FILL/FIXED restore doesn't override CTA nodes
-  var allCTANodes = contentFrame.findAll(function (n) {
-    return n.name.toLowerCase().indexOf("cta") !== -1;
-  });
-  for (var ci = 0; ci < allCTANodes.length; ci++) {
-    var ctaNode = allCTANodes[ci];
-    // Set CTA itself
-    try {
-      var ctaLocked = ctaNode.locked;
-      if (ctaLocked) ctaNode.locked = false;
-      if (ctaNode.layoutSizingHorizontal !== undefined) ctaNode.layoutSizingHorizontal = "HUG";
-      if (ctaNode.layoutSizingVertical !== undefined) ctaNode.layoutSizingVertical = "HUG";
-      if (ctaLocked) ctaNode.locked = true;
-      console.log("[cta-hug] HUG: " + ctaNode.name);
-    } catch (e) { }
-    // Set all descendants
-    if (!ctaNode.findAll) continue;
-    var ctaChildren = ctaNode.findAll(function (c) { return true; });
-    for (var cci = 0; cci < ctaChildren.length; cci++) {
-      var cc = ctaChildren[cci];
-      try {
-        if (!nodeExists(cc)) continue;
-        var ccLocked = cc.locked;
-        if (ccLocked) cc.locked = false;
-        if (cc.layoutSizingHorizontal !== undefined) cc.layoutSizingHorizontal = "HUG";
-        if (cc.layoutSizingVertical !== undefined) cc.layoutSizingVertical = "HUG";
-        if (ccLocked) cc.locked = true;
-        console.log("[cta-hug] HUG child: " + cc.name);
-      } catch (e) { }
-    }
   }
 
   // ── SET TEXT NODES + THEIR PARENTS TO HUG HEIGHT ────────────────────────────
@@ -866,19 +1183,81 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
     }
   }
 
+  // ── SET CTA AND ALL CHILDREN TO HUG WIDTH (runs last, overrides FIXED from Rule 1) ──
+  var allCTANodes = contentFrame.findAll(function (n) {
+    return n.name.toLowerCase().indexOf("cta") !== -1;
+  });
+  for (var ci = 0; ci < allCTANodes.length; ci++) {
+    var ctaNode = allCTANodes[ci];
+    try {
+      var ctaLocked = ctaNode.locked;
+      if (ctaLocked) ctaNode.locked = false;
+      if (ctaNode.layoutSizingHorizontal !== undefined) {
+        ctaNode.layoutSizingHorizontal = "HUG";
+        console.log("[cta-hug] HUG width: " + ctaNode.name);
+      }
+      if (ctaLocked) ctaNode.locked = true;
+    } catch (e) { }
+    if (!ctaNode.findAll) continue;
+    var ctaChildren = ctaNode.findAll(function (c) { return true; });
+    for (var cci = 0; cci < ctaChildren.length; cci++) {
+      var cc = ctaChildren[cci];
+      try {
+        if (!nodeExists(cc)) continue;
+        var ccLocked = cc.locked;
+        if (ccLocked) cc.locked = false;
+        if (cc.layoutSizingHorizontal !== undefined) {
+          cc.layoutSizingHorizontal = "HUG";
+          console.log("[cta-hug] HUG width child: " + cc.name);
+        }
+        if (ccLocked) cc.locked = true;
+      } catch (e) { }
+    }
+  }
+
+  // ── SET TEXT LAYERS TO FILL WIDTH (if not inside CTA) ───────────────────────
+  // Text nodes outside CTA should fill their parent width for proper wrapping
+  var allTextNodes = contentFrame.findAll(function (n) { return n.type === "TEXT"; });
+  for (var ti2 = 0; ti2 < allTextNodes.length; ti2++) {
+    var tn2 = allTextNodes[ti2];
+    try {
+      // Check if any ancestor has "cta" in name — if so, skip (CTA handles its own sizing)
+      var insideCTA2 = false;
+      var anc = tn2.parent;
+      while (anc && anc.id !== contentFrame.id) {
+        if (anc.name.toLowerCase().indexOf("cta") !== -1) { insideCTA2 = true; break; }
+        anc = anc.parent;
+      }
+      if (insideCTA2) continue;
+      // Parent must be auto-layout for FILL to work
+      if (!tn2.parent || !tn2.parent.layoutMode || tn2.parent.layoutMode === "NONE") continue;
+      if (tn2.layoutSizingHorizontal === undefined) continue;
+      var tn2Locked = tn2.locked;
+      if (tn2Locked) tn2.locked = false;
+      tn2.layoutSizingHorizontal = "FILL";
+      if (tn2Locked) tn2.locked = true;
+    } catch (e) { }
+  }
+
   // Set final position AFTER all processing
+  var batchMode = (row1YHint !== undefined && row1YHint !== null);
   var finalSiblings = [];
+
+  // Collect siblings to the right of the master
+  // In batch mode: exclude frames that are strictly ABOVE row1YHint (from previous themes)
+  // but include frames at row1Y and below (current theme's row1 and row2+)
   for (var si = 0; si < page.children.length; si++) {
     var n = page.children[si];
-    if (n.id !== master.id && n.id !== contentFrame.id &&
-      n.x >= master.x + master.width - 1) {
-      finalSiblings.push(n);
-    }
+    if (n.id === master.id || n.id === contentFrame.id) continue;
+    if (n.x < packageRightEdgeRef - 1) continue;
+    // In batch mode: skip frames that are above row1YHint (they belong to earlier themes)
+    if (batchMode && n.y < row1YHint - 2) continue;
+    finalSiblings.push(n);
   }
   finalSiblings.sort(function (a, b) { return a.x - b.x; });
 
   // row1Y = use hint if provided (batch mode), else find from siblings
-  var row1Y = (row1YHint !== undefined && row1YHint !== null) ? row1YHint : null;
+  var row1Y = batchMode ? row1YHint : null;
   if (row1Y === null) {
     row1Y = finalSiblings.length > 0 ? finalSiblings[0].y : master.y;
     for (var i = 1; i < finalSiblings.length; i++) {
@@ -892,7 +1271,7 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
   // In single mode: use GAP tolerance since Y is detected from canvas
   var row1Banners = [];
   var otherBanners = [];
-  var batchMode = (row1YHint !== undefined && row1YHint !== null);
+  // batchMode already declared above
   for (var i = 0; i < finalSiblings.length; i++) {
     var s = finalSiblings[i];
     var tolerance = batchMode ? 2 : GAP;
@@ -910,10 +1289,25 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
 
   var finalX, finalY;
 
-  if (row1Banners.length < MAX_PER_ROW) {
+  // ── Retailer break: force this banner onto a brand-new row, below everything
+  // placed so far, regardless of how much space is left in the current row ──
+  if (forceNewRow) {
+    var allBottom = -Infinity;
+    for (var i = 0; i < row1Banners.length; i++) {
+      var b = row1Banners[i].y + row1Banners[i].height;
+      if (b > allBottom) allBottom = b;
+    }
+    for (var i = 0; i < otherBanners.length; i++) {
+      var b = otherBanners[i].y + otherBanners[i].height;
+      if (b > allBottom) allBottom = b;
+    }
+    finalX = firstCreatedX;
+    finalY = (allBottom === -Infinity) ? (batchMode ? row1Y : master.y) : allBottom + GAP;
+    console.log("[retailerBreak] forcing new row at y=" + Math.round(finalY));
+  } else if (row1Banners.length < MAX_PER_ROW && (rowFloorY == null || row1Y >= rowFloorY - 2)) {
     if (row1Banners.length === 0) {
       finalX = firstCreatedX;
-      finalY = master.y; // First ever banner aligns to master
+      finalY = batchMode ? row1Y : master.y; // Align to the row1 hint (e.g. a chained package baseline) if given, else to master
     } else {
       var last1 = row1Banners[row1Banners.length - 1];
       finalX = last1.x + last1.width + GAP;
@@ -921,13 +1315,19 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
 
     }
   } else {
-    // Row 1 full — find bottom of tallest in row 1
+    // Row 1 full (or below the current retailer's row floor) — find bottom of tallest banner in row 1
+    // In batch mode: only use banners at exactly row1Y to avoid mixing with other themes
     var row1Bottom = -Infinity;
     for (var i = 0; i < row1Banners.length; i++) {
-      var b = row1Banners[i].y + row1Banners[i].height;
-      console.log("  row1[" + i + "] y=" + Math.round(row1Banners[i].y) + " h=" + Math.round(row1Banners[i].height) + " bottom=" + Math.round(b));
+      var rb = row1Banners[i];
+      // Only count banners that are truly on row1 (within 2px of row1Y)
+      if (batchMode && Math.abs(rb.y - row1Y) > 2) continue;
+      var b = rb.y + rb.height;
+      console.log("  row1[" + i + "] y=" + Math.round(rb.y) + " h=" + Math.round(rb.height) + " bottom=" + Math.round(b));
       if (b > row1Bottom) row1Bottom = b;
     }
+    // Also include current frame height in row1Bottom calculation
+    if (row1Bottom === -Infinity) row1Bottom = row1Y + newH;
     console.log("row1Bottom=" + Math.round(row1Bottom) + " row2Y=" + Math.round(row1Bottom + GAP));
     var row2Y = row1Bottom + GAP;
 
@@ -951,9 +1351,11 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
       console.log("  otherRow[" + r + "] count=" + otherRows[r].length + " y=" + Math.round(otherRows[r][0].y));
     }
 
-    // Find first row with space
+    // Find first row with space — skip rows above the current retailer's row floor
+    // (those belong to an earlier retailer group and must not be backfilled)
     var targetOtherRow = null;
     for (var r = 0; r < otherRows.length; r++) {
+      if (rowFloorY != null && otherRows[r][0].y < rowFloorY - 2) continue;
       if (otherRows[r].length < MAX_PER_ROW) { targetOtherRow = otherRows[r]; break; }
     }
 
@@ -967,7 +1369,7 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
       finalX = lastOther.x + lastOther.width + GAP;
       finalY = targetOtherRow[0].y;
     } else {
-      // All other rows full — start a new row below the last one
+      // All other rows full (or below the floor) — start a new row below the last one
       var lastOtherRow = otherRows[otherRows.length - 1];
       var lastOtherBottom = -Infinity;
       for (var i = 0; i < lastOtherRow.length; i++) {
@@ -984,66 +1386,6 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
 
   console.log("Final position: x=" + contentFrame.x + " y=" + contentFrame.y + " w=" + contentFrame.width + " h=" + contentFrame.height);
 
-  // ── LAST STEP: Fix "bg" layer image fill ─────────────────────────────────────
-  // Must run after all scaling and positioning is complete
-  var bgNodes = contentFrame.findAll(function (n) {
-    return n.name.toLowerCase() === "bg";
-  });
-  for (var bi = 0; bi < bgNodes.length; bi++) {
-    var bgNode = bgNodes[bi];
-    if (!bgNode.fills || bgNode.fills === figma.mixed || bgNode.fills.length === 0) continue;
-    try {
-      // Wait 1s for Figma to fully settle before touching the image fill
-      await new Promise(function (resolve) { setTimeout(resolve, 1000); });
-
-      // Step 1: Set to FILL — Figma recalculates transform to cover the new frame size
-      var fillFills = [];
-      for (var fi = 0; fi < bgNode.fills.length; fi++) {
-        var fill = bgNode.fills[fi];
-        if (fill.type === "IMAGE") {
-          var f = {}; for (var key in fill) { f[key] = fill[key]; }
-          f.scaleMode = "FILL";
-          fillFills.push(f);
-        } else { fillFills.push(fill); }
-      }
-      bgNode.fills = fillFills;
-      console.log("bg set to FILL: " + bgNode.name);
-
-      // Wait 1s for FILL transform to be fully applied
-      await new Promise(function (resolve) { setTimeout(resolve, 200); });
-
-      // Step 2: Set to CROP — keeps the FILL-calculated transform
-      var cropFills = [];
-
-      for (var fi = 0; fi < bgNode.fills.length; fi++) {
-
-        var fill = bgNode.fills[fi];
-
-        if (fill.type === "IMAGE") {
-
-          var f = {};
-
-          for (var key in fill) {
-            f[key] = fill[key];
-          }
-
-          // preserve transform from FILL
-          f.scaleMode = "CROP";
-
-          cropFills.push(f);
-
-        } else {
-
-          cropFills.push(fill);
-
-        }
-      }
-
-      bgNode.fills = cropFills;
-      console.log("bg set to CROP: " + bgNode.name);
-    } catch (e) { console.error("bg fix failed:", e); }
-  }
-
   // ── POST-RESIZE SIZING RULES ─────────────────────────────────────────────────
   // Rule 1: ABSOLUTE layer → FIXED width
   // Rule 3: CTA inside absolute → HUG
@@ -1056,9 +1398,9 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
       try { layoutPos = n.layoutPositioning; } catch (e) { continue; }
       if (layoutPos !== "ABSOLUTE") continue;
 
-      // Rule 1: absolute layer itself → FIXED
+      // Rule 1: absolute layer itself → FIXED (skip CTA — stays HUG)
       try {
-        if (n.layoutSizingHorizontal !== undefined) {
+        if (n.layoutSizingHorizontal !== undefined && n.name.toLowerCase().indexOf("cta") === -1) {
           n.layoutSizingHorizontal = "FIXED";
           console.log("[sizing] FIXED: " + n.name);
         }
@@ -1072,15 +1414,14 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
         try {
           if (inner.layoutSizingHorizontal === undefined) continue;
 
-          // Rule 3: node named CTA → HUG width + height
+          // Rule 3: node named CTA → HUG width only
           if (inner.name.toLowerCase().indexOf("cta") !== -1) {
-            try { inner.layoutSizingHorizontal = "HUG"; } catch (e) { }
-            try { inner.layoutSizingVertical = "HUG"; } catch (e) { }
-            console.log("[sizing] HUG H+V (CTA): " + inner.name);
+            try { if (inner.layoutSizingHorizontal !== undefined) inner.layoutSizingHorizontal = "HUG"; } catch (e) { }
+            console.log("[sizing] HUG W (CTA): " + inner.name);
             continue;
           }
 
-          // Rule 4: node inside a CTA ancestor → HUG width + height
+          // Rule 4: node inside a CTA ancestor → HUG width only
           var insideCTA = false;
           var ancestor = inner.parent;
           while (ancestor && ancestor !== n) {
@@ -1088,9 +1429,8 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
             ancestor = ancestor.parent;
           }
           if (insideCTA) {
-            try { inner.layoutSizingHorizontal = "HUG"; } catch (e) { }
-            try { inner.layoutSizingVertical = "HUG"; } catch (e) { }
-            console.log("[sizing] HUG H+V (inside CTA): " + inner.name);
+            try { if (inner.layoutSizingHorizontal !== undefined) inner.layoutSizingHorizontal = "HUG"; } catch (e) { }
+            console.log("[sizing] HUG W (inside CTA): " + inner.name);
           }
         } catch (e) { console.error("[sizing] failed on " + inner.name + ":", e); }
       }
@@ -1099,6 +1439,134 @@ async function duplicateAndResize(master, newW, newH, label, row1YHint, maxPerRo
 
   figma.viewport.scrollAndZoomIntoView([contentFrame]);
   return contentFrame;
+}
+
+// ─── Resumable batch queue ─────────────────────────────────────────────────────
+// Runs (or resumes) a batch of sizes starting at state.startIndex. If the user hits
+// Stop mid-run, progress is saved into _pausedBatch and a PAUSED message is sent so
+// the UI can show a Continue button; CONTINUE_BATCH picks this function back up.
+async function runBatchQueue(masterNode, sizes, maxPerRow, retailerBreak, verticalLayout, state) {
+  var done = state.done;
+  var errors = state.errors;
+  var batchRow1Y = state.batchRow1Y;
+  // Tracks the retailer (col1) of the previously placed banner, and the Y of the
+  // row floor below which the current retailer's banners must not backfill —
+  // both are only used when "Retailer break line" is enabled.
+  var prevCol1 = state.prevCol1;
+  var retailerRowFloorY = state.retailerRowFloorY;
+  // When set, chains this whole package to the right of a previous template's package
+  // (see BATCH_RESIZE handler). Stays constant for every banner in this run.
+  var anchorX = state.anchorX != null ? state.anchorX : null;
+  // Identifies which template (frame + selected variant) this run belongs to.
+  var packageKey = state.packageKey;
+
+  for (var si = state.startIndex; si < sizes.length; si++) {
+    if (_stopRequested) {
+      _pausedBatch = null;
+      figma.ui.postMessage({ type: "DONE", message: "Stopped after " + done + " banners" });
+      return;
+    }
+    if (_pauseRequested) {
+      _pausedBatch = {
+        sel: masterNode, sizes: sizes, maxPerRow: maxPerRow, retailerBreak: retailerBreak, verticalLayout: verticalLayout,
+        startIndex: si, done: done, errors: errors,
+        batchRow1Y: batchRow1Y, prevCol1: prevCol1, retailerRowFloorY: retailerRowFloorY, anchorX: anchorX, packageKey: packageKey
+      };
+      figma.ui.postMessage({ type: "PAUSED", message: "Paused after " + done + "/" + sizes.length + " banners", done: done, total: sizes.length });
+      return;
+    }
+    try {
+      var s = sizes[si];
+      var curCol1 = s.col1 || null;
+      // Vertical layout: every banner gets its own row, stacked in a single column
+      // below the master. Otherwise, force a brand-new row whenever the retailer
+      // (col1) changes from the previous banner ("Retailer break line").
+      var forceNewRow = verticalLayout || (retailerBreak && prevCol1 !== null && curCol1 !== prevCol1);
+
+      figma.ui.postMessage({ type: "PROGRESS", done: done, total: sizes.length, message: "Creating " + s.width + "x" + s.height + "…" });
+      var result = await duplicateAndResize(masterNode, s.width, s.height, s.label || null, batchRow1Y, maxPerRow, s.col1 || null, forceNewRow, retailerRowFloorY, anchorX);
+
+      // Only set row1Y once from the very first banner — never update it
+      if (batchRow1Y === null) batchRow1Y = result.y;
+      if (forceNewRow) retailerRowFloorY = result.y;
+
+      // Keep the package tracker up to date so the NEXT template (if a different
+      // template/variant is selected) chains immediately to the right of this one.
+      _lastPackageKey = packageKey;
+      _lastPackageBaselineY = batchRow1Y;
+      var packageEdge = result.x + result.width;
+      if (_lastPackageRightX === null || packageEdge > _lastPackageRightX) _lastPackageRightX = packageEdge;
+
+      console.log("Batch [" + si + "] " + s.width + "x" + s.height + " placed x=" + Math.round(result.x) + " y=" + Math.round(result.y) + " batchRow1Y=" + Math.round(batchRow1Y) + " forceNewRow=" + forceNewRow + " retailer=" + curCol1);
+
+      prevCol1 = curCol1;
+
+      await new Promise(function (resolve) { setTimeout(resolve, 200); });
+      done++;
+    } catch (err) {
+      console.error("Batch error at " + sizes[si].width + "x" + sizes[si].height + ":", err);
+      errors++;
+      done++;
+    }
+  }
+
+  _pausedBatch = null;
+  var msg2 = "✓ Created " + (done - errors) + "/" + sizes.length + " banners";
+  if (errors > 0) msg2 += " (" + errors + " failed)";
+  figma.ui.postMessage({ type: "SUCCESS", message: msg2 });
+}
+
+// ─── Resumable export queue ─────────────────────────────────────────────────────
+// Runs (or resumes) an export over a flat list of { node, folder } tasks, starting at
+// state.startIndex. Stop/Pause behave the same way as the batch queue above: Stop
+// discards everything and ends; Pause saves progress into _pausedExport so
+// CONTINUE_EXPORT can pick it back up exactly where it left off.
+async function runExportQueue(tasks, format, scale, state) {
+  var done = state.done;
+  var total = state.total;
+
+  for (var i = state.startIndex; i < tasks.length; i++) {
+    if (_stopRequested) {
+      _pausedExport = null;
+      console.log("[export] stopped by user after " + done + "/" + total);
+      figma.ui.postMessage({ type: "EXPORT_DONE", message: "Stopped after " + done + "/" + total + " frames", format: format, assetsExported: done, stopped: true });
+      return;
+    }
+    if (_pauseRequested) {
+      _pausedExport = { tasks: tasks, format: format, scale: scale, startIndex: i, done: done, total: total };
+      console.log("[export] paused after " + done + "/" + total);
+      figma.ui.postMessage({ type: "EXPORT_PAUSED", message: "Paused after " + done + "/" + total + " frames", done: done, total: total });
+      return;
+    }
+
+    var task = tasks[i];
+    var node = task.node;
+    var folder = task.folder;
+    try {
+      console.log("[export] " + (i + 1) + "/" + total + ": " + (folder ? folder + "/" : "") + node.name);
+      var bytes = await node.exportAsync({ format: format === "PDF" ? "PNG" : format, constraint: { type: "SCALE", value: scale } });
+      figma.ui.postMessage({
+        type: "EXPORT_FILE",
+        name: node.name + ((format === "JPG") ? ".jpg" : ".png"),
+        bytes: bytes,
+        folder: folder || "",
+        format: format,
+        width: Math.round(node.width * scale),
+        height: Math.round(node.height * scale),
+        x: Math.round(node.x),
+        y: Math.round(node.y)
+      });
+      done++;
+      figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "✓ " + (folder ? folder + "/" : "") + node.name });
+    } catch (e) {
+      console.error("[export] FAILED: " + node.name + " — " + (e.message || e));
+      figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "✗ " + node.name + ": " + (e.message || "error") });
+    }
+  }
+
+  _pausedExport = null;
+  console.log("=== EXPORT DONE ===");
+  figma.ui.postMessage({ type: "EXPORT_DONE", message: "✓ Exported " + done + "/" + total + " frames", format: format, assetsExported: done });
 }
 
 // ─── Selection info ───────────────────────────────────────────────────────────
@@ -1229,9 +1697,77 @@ async function scanTemplates() {
 
 figma.on("selectionchange", function () { sendSelectionInfo(); });
 
+// Templates were previously only scanned once when the plugin panel first opened (or on
+// manual refresh), so switching to a different Figma page never updated the Template
+// dropdown — a page without templates would correctly hide it, but a later page that DID
+// have templates would stay hidden too, since nothing ever looked again.
+figma.on("currentpagechange", function () {
+  scanTemplates();
+  sendSelectionInfo();
+});
+
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 figma.ui.onmessage = async function (msg) {
+  if (msg.type === "LICENSE_STATUS") {
+    licenseValid = !!msg.valid;
+    if (!licenseValid) {
+      console.log("License check failed: " + (msg.reason || "unknown"));
+    }
+    return;
+  }
+
+  if (msg.type === "SAVE_DEVICE_ID") {
+    await figma.clientStorage.setAsync("mr-device-id", msg.deviceId);
+    return;
+  }
+
+  if (msg.type === "SAVE_LICENSE_KEY") {
+    await figma.clientStorage.setAsync("mr-license-key", msg.key);
+    return;
+  }
+
+  if (msg.type === "CLEAR_LICENSE_KEY") {
+    await figma.clientStorage.deleteAsync("mr-license-key");
+    return;
+  }
+
+  if (requiresLicense(msg.type) && !licenseValid) {
+    figma.ui.postMessage({ type: "ERROR", message: "Enter a valid license key to use this feature." });
+    return;
+  }
+
+  if (msg.type === "STOP_PROCESS") {
+    _stopRequested = true;
+    _pausedBatch = null; // hard stop — discard any resumable state, no Continue button
+    _pausedTranslate = null;
+    if (_pendingCollisionResolve) {
+      // A translate collision modal may be open, awaiting a choice — resolve it now
+      // with a stop sentinel so that await doesn't hang forever with nothing left to
+      // ever resolve it.
+      var resolveOnStop = _pendingCollisionResolve;
+      _pendingCollisionResolve = null;
+      resolveOnStop("__stop__");
+    }
+    figma.ui.postMessage({ type: "STOPPED", message: "Stopped by user" });
+    return;
+  }
+
+  if (msg.type === "TRANSLATE_COLLISION_RESOLVED") {
+    if (_pendingCollisionResolve) {
+      var resolveFn = _pendingCollisionResolve;
+      _pendingCollisionResolve = null;
+      resolveFn(msg.choice); // 'override' | 'override-all' | 'keep-both' | 'keep-both-all'
+    }
+    return;
+  }
+
+  if (msg.type === "PAUSE_PROCESS") {
+    _pauseRequested = true;
+    figma.ui.postMessage({ type: "PAUSING", message: "Pausing…" });
+    return;
+  }
+
   if (msg.type === "GET_MASTER_INFO") { sendSelectionInfo(); return; }
 
   if (msg.type === "GET_TEMPLATES") {
@@ -1278,6 +1814,7 @@ figma.ui.onmessage = async function (msg) {
   }
 
   if (msg.type === "RESIZE_BANNER") {
+    _stopRequested = false;
     var width = msg.width; var height = msg.height;
     if (!width || !height || width <= 0 || height <= 0) {
       figma.ui.postMessage({ type: "ERROR", message: "Please enter valid width and height." });
@@ -1296,37 +1833,51 @@ figma.ui.onmessage = async function (msg) {
   }
 
   if (msg.type === "BATCH_RESIZE") {
+    _stopRequested = false;
+    _pauseRequested = false;
+    _pausedBatch = null;
     var sizes = msg.sizes;
     var maxPerRow = msg.maxPerRow || 5;
+    var retailerBreak = !!msg.retailerBreak;
+    var verticalLayout = !!msg.verticalLayout;
     var sel = getSelectedFrame();
     if (!sel.node) { figma.ui.postMessage({ type: "ERROR", message: sel.error }); return; }
+
+    // Identity of "this template": the frame id plus the currently selected variant
+    // name, since templates are variant swaps inside the SAME frame — the frame id
+    // alone never changes between templates (see SELECT_TEMPLATE).
+    var packageKey = sel.node.id + "::" + (selectedVariantName || "");
+
+    // If a DIFFERENT template was used last time, chain this new template's whole
+    // package immediately to the right of the previous package, aligned to the
+    // same row1 baseline — instead of anchoring to this master's own position.
+    var PACKAGE_GAP = 60;
+    var isNewTemplate = (_lastPackageKey !== null && packageKey !== _lastPackageKey);
+    var initialAnchorX = isNewTemplate ? (_lastPackageRightX + PACKAGE_GAP) : null;
+    var initialRow1Y = isNewTemplate ? _lastPackageBaselineY : null;
+    console.log("[batch] packageKey=" + packageKey + " isNewTemplate=" + isNewTemplate + " anchorX=" + initialAnchorX + " row1Y=" + initialRow1Y);
+
     figma.ui.postMessage({ type: "LOADING", message: "Starting batch — " + sizes.length + " banners…" });
-    var done = 0;
-    var errors = 0;
-    var batchRow1Y = null;
+    await runBatchQueue(sel.node, sizes, maxPerRow, retailerBreak, verticalLayout, {
+      startIndex: 0, done: 0, errors: 0, batchRow1Y: initialRow1Y, prevCol1: null, retailerRowFloorY: null, anchorX: initialAnchorX, packageKey: packageKey
+    });
+    return;
+  }
 
-    for (var si = 0; si < sizes.length; si++) {
-      try {
-        var s = sizes[si];
-        figma.ui.postMessage({ type: "PROGRESS", done: done, total: sizes.length, message: "Creating " + s.width + "x" + s.height + "…" });
-        var result = await duplicateAndResize(sel.node, s.width, s.height, s.label || null, batchRow1Y, maxPerRow, s.col1 || null);
-
-        // Only set row1Y once from the very first banner — never update it
-        if (batchRow1Y === null) batchRow1Y = result.y;
-
-        console.log("Batch [" + si + "] " + s.width + "x" + s.height + " placed x=" + Math.round(result.x) + " y=" + Math.round(result.y) + " batchRow1Y=" + Math.round(batchRow1Y));
-
-        await new Promise(function (resolve) { setTimeout(resolve, 200); });
-        done++;
-      } catch (err) {
-        console.error("Batch error at " + sizes[si].width + "x" + sizes[si].height + ":", err);
-        errors++;
-        done++;
-      }
+  if (msg.type === "CONTINUE_BATCH") {
+    if (!_pausedBatch) {
+      figma.ui.postMessage({ type: "ERROR", message: "Nothing to continue — no paused batch found." });
+      return;
     }
-    var msg2 = "✓ Created " + (done - errors) + "/" + sizes.length + " banners";
-    if (errors > 0) msg2 += " (" + errors + " failed)";
-    figma.ui.postMessage({ type: "SUCCESS", message: msg2 });
+    _stopRequested = false;
+    _pauseRequested = false;
+    var p = _pausedBatch;
+    _pausedBatch = null;
+    figma.ui.postMessage({ type: "LOADING", message: "Resuming batch — " + (p.sizes.length - p.startIndex) + " banners left…" });
+    await runBatchQueue(p.sel, p.sizes, p.maxPerRow, p.retailerBreak, p.verticalLayout, {
+      startIndex: p.startIndex, done: p.done, errors: p.errors,
+      batchRow1Y: p.batchRow1Y, prevCol1: p.prevCol1, retailerRowFloorY: p.retailerRowFloorY, anchorX: p.anchorX, packageKey: p.packageKey
+    });
     return;
   }
 
@@ -1345,32 +1896,37 @@ figma.ui.onmessage = async function (msg) {
     var layers = [];
     var seenTexts = {};
 
-    // Try selected frame first, then fall back to all frames on the page
-    var result = getSelectedFrame();
-    var sourceNode = result.node || null;
-
-    // If no frame selected, use the first frame on the current page
-    if (!sourceNode) {
+    // Scan across every relevant frame, not just one — otherwise auto-matching (and
+    // therefore the mapping list) only ever sees text from a single template, missing
+    // fields that live in the other templates on the page.
+    var canvasSelection = figma.currentPage.selection;
+    var sourceNodes = [];
+    if (canvasSelection && canvasSelection.length > 0) {
+      for (var ci = 0; ci < canvasSelection.length; ci++) {
+        var csn = canvasSelection[ci];
+        if (csn.type === "FRAME" || csn.type === "COMPONENT" || csn.type === "INSTANCE") sourceNodes.push(csn);
+      }
+    }
+    // Nothing usable selected — fall back to every top-level frame on the page
+    if (sourceNodes.length === 0) {
       for (var pi = 0; pi < figma.currentPage.children.length; pi++) {
         var child = figma.currentPage.children[pi];
-        if (child.type === "FRAME" || child.type === "COMPONENT" || child.type === "INSTANCE") {
-          sourceNode = child;
-          break;
-        }
+        if (child.name.toLowerCase() === "master") continue;
+        if (child.type === "FRAME" || child.type === "COMPONENT" || child.type === "INSTANCE") sourceNodes.push(child);
       }
     }
 
-    if (sourceNode) {
-      var textNodes = sourceNode.findAll(function (n) { return n.type === "TEXT"; });
+    for (var sn = 0; sn < sourceNodes.length; sn++) {
+      var textNodes = sourceNodes[sn].findAll(function (n) { return n.type === "TEXT"; });
       for (var i = 0; i < textNodes.length; i++) {
         var txt = textNodes[i].characters.trim();
         if (!txt || seenTexts[txt]) continue; // skip empty or duplicate text
         seenTexts[txt] = true;
-        console.log("TEXT LAYER [" + textNodes[i].name + "] = " + JSON.stringify(txt.substring(0, 50)));
+        console.log("TEXT LAYER [" + textNodes[i].name + "] = " + JSON.stringify(txt.substring(0, 50)) + " (from " + sourceNodes[sn].name + ")");
         layers.push({ id: textNodes[i].id, name: textNodes[i].name, text: textNodes[i].characters });
       }
     }
-    console.log("Total text layers: " + layers.length + " (from: " + (sourceNode ? sourceNode.name : "none") + ")");
+    console.log("Total text layers: " + layers.length + " (scanned " + sourceNodes.length + " frame(s): " + sourceNodes.map(function (n) { return n.name; }).join(", ") + ")");
     figma.ui.postMessage({ type: "TEXT_LAYERS", layers: layers });
     return;
   }
@@ -1385,28 +1941,278 @@ figma.ui.onmessage = async function (msg) {
     return;
   }
 
-  if (msg.type === "TRANSLATE_BANNERS") {
-    var languages = msg.languages;
-    var mappings = msg.mappings;
-    var rows = msg.rows;
-    var sizeRules = msg.sizeRules || null; // { 'DE': [{w,h},...], ... } or null = translate all
-    var sourcePage = figma.currentPage;
-    var total = languages.length;
-    var done = 0;
+  if (msg.type === "TRANSLATE_BANNERS" || msg.type === "CONTINUE_TRANSLATE") {
+    var isResumeTranslate = msg.type === "CONTINUE_TRANSLATE";
+    if (isResumeTranslate && !_pausedTranslate) {
+      figma.ui.postMessage({ type: "ERROR", message: "Nothing to continue — no paused translation found." });
+      return;
+    }
+    _stopRequested = false;
+    _pauseRequested = false;
 
-    console.log("=== TRANSLATE START ===");
-    console.log("Languages: " + languages.join(', '));
-    console.log("Mappings: " + JSON.stringify(Object.keys(mappings)));
-    console.log("Source page: " + sourcePage.name + " (" + sourcePage.children.length + " frames)");
+    var languages, mappings, rows, sizeRules, selectedSizes, selectedFrameIds, sourcePageId, sourcePage, total, done, sourceRows, translateStartIndex;
+    var frameRowY = {};  // sourceFrame.id -> its row's original y (populated below on a
+    // fresh start, or restored from paused state on resume)
+    var framePackageIndex = {}; // sourceFrame.id -> which side-by-side package it belongs to
+    var packageRanges = []; // [{ minX, maxX }] — one entry per detected side-by-side package
+    var ROW_GAP = 60;    // constant, always available regardless of fresh-start/resume
+    var ROW_Y_TOLERANCE = 10; // constant, same reasoning
+    // Real package boundaries (side-by-side template groups chained via BATCH_RESIZE,
+    // e.g. Ad1/Ad2/Ad3...) measure in the thousands of px; the normal column gap WITHIN
+    // a row/package is ROW_GAP-ish (60px). This threshold sits safely between the two so
+    // a package break is never confused with an ordinary in-row gap.
+    var PACKAGE_X_GAP_THRESHOLD = 500;
 
-    figma.ui.postMessage({ type: "TRANSLATE_PROGRESS", message: "Starting…", done: 0, total: total, detail: "0/" + total });
+    if (isResumeTranslate) {
+      var pT = _pausedTranslate;
+      _pausedTranslate = null;
+      languages = pT.languages; mappings = pT.mappings; rows = pT.rows; sizeRules = pT.sizeRules;
+      selectedSizes = pT.selectedSizes; sourcePageId = pT.sourcePageId; total = pT.total; done = pT.done;
+      selectedFrameIds = pT.selectedFrameIds || null;
+      sourceRows = pT.sourceRows; translateStartIndex = pT.startIndex; frameRowY = pT.frameRowY || {};
+      framePackageIndex = pT.framePackageIndex || {};
+      packageRanges = pT.packageRanges || [];
+      try { await figma.loadAllPagesAsync(); } catch (e) { console.log("loadAllPagesAsync failed: " + e.message); }
+      for (var spi0 = 0; spi0 < figma.root.children.length; spi0++) {
+        if (figma.root.children[spi0].id === sourcePageId) { sourcePage = figma.root.children[spi0]; break; }
+      }
+      figma.ui.postMessage({ type: "LOADING", message: "Resuming translation — " + (languages.length - translateStartIndex) + " languages left…" });
+      console.log("=== TRANSLATE RESUME === startIndex=" + translateStartIndex + " done=" + done + "/" + total);
+    } else {
+      // Figma requires any page other than the current one to be explicitly loaded
+      // before its .children (or most other properties) can be accessed — this handler
+      // looks up/creates target pages by language name later on and accesses their
+      // .children directly, which throws "Cannot access property children on a page
+      // that has not been explicitly loaded" without this call.
+      try { await figma.loadAllPagesAsync(); } catch (e) { console.log("loadAllPagesAsync failed: " + e.message); }
 
-    for (var li = 0; li < languages.length; li++) {
+      languages = msg.languages;
+      mappings = msg.mappings;
+      rows = msg.rows;
+      sizeRules = msg.sizeRules || null; // { 'DE': [{w,h},...], ... } or null = translate all
+      selectedSizes = msg.selectedSizes || null; // [{w,h},...] from UI checkboxes
+      selectedFrameIds = null; // populated below ONLY when scope comes from an exact canvas selection
+
+      // Canvas selection is only used as a FALLBACK convenience when the user hasn't
+      // explicitly checked any size boxes in the UI — it must never silently override
+      // an explicit checkbox choice. Previously it always won regardless of what was
+      // checked, so a very ordinary workflow (duplicate an existing frame in Figma to
+      // create a new size, forget to deselect the original) would silently expand
+      // "only translate 768x768" into "768x689 AND 768x768", with no indication to the
+      // user why the extra size showed up.
+      if (!selectedSizes || selectedSizes.length === 0) {
+        var canvasSel = figma.currentPage.selection;
+        if (canvasSel && canvasSel.length > 0) {
+          var canvasSizes = [];
+          var canvasSizeKeys = {};
+          var canvasFrameIds = {};
+          for (var csi = 0; csi < canvasSel.length; csi++) {
+            var csn = canvasSel[csi];
+            if (csn.type !== "FRAME" && csn.type !== "COMPONENT" && csn.type !== "INSTANCE") continue;
+            canvasFrameIds[csn.id] = true;
+            var key = Math.round(csn.width) + "x" + Math.round(csn.height);
+            if (!canvasSizeKeys[key]) {
+              canvasSizeKeys[key] = true;
+              canvasSizes.push({ w: Math.round(csn.width), h: Math.round(csn.height) });
+            }
+          }
+          if (canvasSizes.length > 0) {
+            selectedSizes = canvasSizes;
+            // IMPORTANT: also remember the EXACT frames selected, not just their
+            // sizes. Multiple side-by-side packages (e.g. Ad1..Ad5) share
+            // identical size sets by design — matching by size ALONE would pull
+            // in the same-size frame from every OTHER package too, even though
+            // the user only selected 10 frames within ONE package. Whenever the
+            // scope came from an actual canvas selection, exact-frame-id matching
+            // takes over completely (see frameSurvivesForLang and the clone loop
+            // below) instead of the broader size-only match.
+            selectedFrameIds = canvasFrameIds;
+            console.log("No size checkboxes checked — using canvas selection: " + Object.keys(canvasFrameIds).length + " exact frame(s) selected (sizes: " + canvasSizes.map(function (s) { return s.w + 'x' + s.h; }).join(', ') + ")");
+          }
+        }
+      }
+
+      sourcePageId = figma.currentPage.id;
+      sourcePage = figma.currentPage;
+      total = languages.length;
+      done = 0;
+      translateStartIndex = 0;
+
+      console.log("=== TRANSLATE START ===");
+      console.log("Languages: " + languages.join(', '));
+      console.log("Mappings: " + JSON.stringify(Object.keys(mappings)));
+      console.log("Source page: " + sourcePage.name + " (" + sourcePage.children.length + " frames)");
+    }
+
+    // Same "does this frame survive for this language" check used below when actually
+    // cloning — duplicated here (not shared) so the proven per-frame skip logic in the
+    // clone loop is never touched; this copy is only used to decide which ROWS end up
+    // completely empty for a language, so their vertical space can be closed up.
+    function frameSurvivesForLang(sourceFrame, lang) {
+      if (sourceFrame.name.toLowerCase() === "master") return false;
+      if (selectedFrameIds) {
+        // Canvas-selection-driven run: only the EXACT frames the user selected are
+        // in scope — never another frame elsewhere on the page that merely happens
+        // to share the same WxH (e.g. the same size duplicated across every
+        // side-by-side package).
+        if (!selectedFrameIds[sourceFrame.id]) return false;
+      } else if (selectedSizes && selectedSizes.length > 0) {
+        var fw2 = Math.round(sourceFrame.width);
+        var fh2 = Math.round(sourceFrame.height);
+        var sizeMatch = false;
+        for (var ssi = 0; ssi < selectedSizes.length; ssi++) {
+          if (selectedSizes[ssi].w === fw2 && selectedSizes[ssi].h === fh2) { sizeMatch = true; break; }
+        }
+        if (!sizeMatch) return false;
+      }
+      if (sizeRules && sizeRules[lang] && sizeRules[lang].length > 0) {
+        var allowedSizes = sizeRules[lang];
+        var fw = Math.round(sourceFrame.width);
+        var fh = Math.round(sourceFrame.height);
+        var frameNameLower = sourceFrame.name.toLowerCase().replace(/[_\-\s]/g, '');
+        var sizeAllowed = false;
+        for (var si = 0; si < allowedSizes.length; si++) {
+          var rule = allowedSizes[si];
+          if (rule.w !== fw || rule.h !== fh) continue;
+          if (rule.retailer) {
+            var retailerNorm = rule.retailer.toLowerCase().replace(/[_\-\s\.]/g, '');
+            if (frameNameLower.indexOf(retailerNorm) !== -1) { sizeAllowed = true; break; }
+            var rWords = rule.retailer.toLowerCase().split(/\s+/);
+            var allFound = true;
+            for (var ri2 = 0; ri2 < rWords.length; ri2++) {
+              if (sourceFrame.name.toLowerCase().indexOf(rWords[ri2]) === -1) { allFound = false; break; }
+            }
+            if (allFound) { sizeAllowed = true; break; }
+          } else {
+            sizeAllowed = true; break;
+          }
+        }
+        if (!sizeAllowed) return false;
+      }
+      return true;
+    }
+
+    if (!isResumeTranslate) {
+      // STEP 1 — split all source frames into side-by-side "packages" by X position
+      // (e.g. Ad1, Ad2, Ad3... chained via BATCH_RESIZE's package-to-the-right
+      // chaining). Real package gaps run into the thousands of px; the normal
+      // column gap within one package/row is ~60px — PACKAGE_X_GAP_THRESHOLD sits
+      // safely between the two.
+      var sourceFrameList = [];
+      var contaminatedNames = []; // frames on the SOURCE page that already look translated
+      for (var bi = 0; bi < sourcePage.children.length; bi++) {
+        var bn = sourcePage.children[bi];
+        if (bn.name.toLowerCase() === "master") continue;
+        if (bn.type !== "FRAME" && bn.type !== "COMPONENT" && bn.type !== "INSTANCE") continue;
+        sourceFrameList.push(bn);
+        // The source/master page should only ever contain "_EN" (or otherwise
+        // un-language-suffixed) frames. A frame ending in some OTHER 2-letter
+        // language code (e.g. "_FR") means a previous translate run's clones landed
+        // back on the source page instead of their own language page — corrupting
+        // every future run's row/package detection, since those stray frames get
+        // clustered in by X position right alongside the real source content.
+        var langSuffixMatch = bn.name.match(/[_-]([A-Z]{2})$/i);
+        if (langSuffixMatch && langSuffixMatch[1].toUpperCase() !== "EN") {
+          contaminatedNames.push(bn.name);
+        }
+      }
+      if (contaminatedNames.length > 0) {
+        console.log("⚠️ WARNING: source page \"" + sourcePage.name + "\" has " + contaminatedNames.length + " frame(s) that look already-translated (not _EN) — this will corrupt row/package detection: " + contaminatedNames.slice(0, 10).join(', ') + (contaminatedNames.length > 10 ? ", ...(" + (contaminatedNames.length - 10) + " more)" : ""));
+        figma.ui.postMessage({ type: "TRANSLATE_PROGRESS", message: "⚠️ Source page has " + contaminatedNames.length + " already-translated frame(s) mixed in — results may be corrupted. Check console.", done: 0, total: total, detail: "source page contamination detected" });
+      }
+      var byX = sourceFrameList.slice().sort(function (a, b) { return a.x - b.x; });
+      var rawPackages = []; // [{ minX, maxX, frames: [...] }]
+      for (var pxi = 0; pxi < byX.length; pxi++) {
+        var pf = byX[pxi];
+        var pfRight = pf.x + pf.width;
+        var lastPkg = rawPackages.length > 0 ? rawPackages[rawPackages.length - 1] : null;
+        if (lastPkg && pf.x <= lastPkg.maxX + PACKAGE_X_GAP_THRESHOLD) {
+          lastPkg.frames.push(pf);
+          if (pfRight > lastPkg.maxX) lastPkg.maxX = pfRight;
+        } else {
+          rawPackages.push({ minX: pf.x, maxX: pfRight, frames: [pf] });
+        }
+      }
+      console.log("Detected " + rawPackages.length + " side-by-side package(s) by X-clustering");
+      packageRanges = rawPackages.map(function (p) { return { minX: p.minX, maxX: p.maxX }; });
+
+      // STEP 2 — within EACH package independently, group its own frames into rows
+      // by Y (same rolling-anchor approach as before, scoped to just this package).
+      // Grouping rows PER PACKAGE — instead of once globally — is what keeps later
+      // compaction from flattening separate packages into one continuous column.
+      sourceRows = []; // kept flat (all packages concatenated) for pause/resume + logging
+      frameRowY = {};
+      framePackageIndex = {};
+      for (var pkgI = 0; pkgI < rawPackages.length; pkgI++) {
+        var pkgFramesByY = rawPackages[pkgI].frames.slice().sort(function (a, b) { return a.y - b.y; });
+        var pkgRows = [];
+        for (var bi2 = 0; bi2 < pkgFramesByY.length; bi2++) {
+          var bn2 = pkgFramesByY[bi2];
+          var lastRow = pkgRows.length > 0 ? pkgRows[pkgRows.length - 1] : null;
+          if (lastRow && Math.abs(bn2.y - lastRow.lastY) <= ROW_Y_TOLERANCE) {
+            lastRow.frames.push(bn2);
+            lastRow.height = Math.max(lastRow.height, bn2.height);
+            lastRow.lastY = bn2.y;
+          } else {
+            pkgRows.push({ y: bn2.y, lastY: bn2.y, frames: [bn2], height: bn2.height, packageIndex: pkgI });
+          }
+        }
+        for (var pr = 0; pr < pkgRows.length; pr++) {
+          sourceRows.push(pkgRows[pr]);
+          for (var pf2 = 0; pf2 < pkgRows[pr].frames.length; pf2++) {
+            frameRowY[pkgRows[pr].frames[pf2].id] = pkgRows[pr].y;
+            framePackageIndex[pkgRows[pr].frames[pf2].id] = pkgI;
+          }
+        }
+        console.log("  package[" + pkgI + "] x=" + Math.round(rawPackages[pkgI].minX) + "-" + Math.round(rawPackages[pkgI].maxX) + " rows=" + pkgRows.length);
+      }
+      console.log("Source rows for compaction: " + sourceRows.length + " (across " + rawPackages.length + " packages)");
+      for (var brLog = 0; brLog < sourceRows.length; brLog++) {
+        console.log("  row[" + brLog + "] pkg=" + sourceRows[brLog].packageIndex + " y=" + Math.round(sourceRows[brLog].y) + " height=" + Math.round(sourceRows[brLog].height) + " frames=" + sourceRows[brLog].frames.length + " names=" + sourceRows[brLog].frames.map(function (f) { return f.name; }).join(', '));
+      }
+
+      figma.ui.postMessage({ type: "TRANSLATE_PROGRESS", message: "Starting…", done: 0, total: total, detail: "0/" + total });
+    }
+
+    for (var li = translateStartIndex; li < languages.length; li++) {
+      if (_stopRequested) {
+        _pausedTranslate = null;
+        console.log("  Stopped by user after " + done + "/" + total + " languages");
+        figma.ui.postMessage({ type: "TRANSLATE_DONE", message: "Stopped after " + done + "/" + total + " languages" });
+        return;
+      }
+      if (_pauseRequested) {
+        _pausedTranslate = {
+          sourcePageId: sourcePageId, sourceRows: sourceRows, languages: languages, mappings: mappings,
+          rows: rows, sizeRules: sizeRules, selectedSizes: selectedSizes, total: total,
+          startIndex: li, done: done, frameRowY: frameRowY, framePackageIndex: framePackageIndex,
+          packageRanges: packageRanges, selectedFrameIds: selectedFrameIds
+        };
+        figma.ui.postMessage({ type: "TRANSLATE_PAUSED", message: "Paused after " + done + "/" + total + " languages", done: done, total: total });
+        return;
+      }
       var lang = languages[li];
-      console.log("--- Processing: " + lang + " (" + (li + 1) + "/" + total + ")");
+      // Re-fetch sourcePage each iteration — figma.createPage() switches currentPage
+      // Re-fetch sourcePage by ID — .find() not available on Figma children
+      for (var spi = 0; spi < figma.root.children.length; spi++) {
+        if (figma.root.children[spi].id === sourcePageId) { sourcePage = figma.root.children[spi]; break; }
+      }
+      console.log("--- Processing: " + lang + " (" + (li + 1) + "/" + total + ") source=" + sourcePage.name);
       var langTranslations = rows[lang];
       if (!langTranslations) {
         console.log("  No translations found for: " + lang);
+        done++; continue;
+      }
+
+      // If a masterfile was uploaded, it's meant to restrict which sizes get
+      // created per language. If this language isn't in it at all (undefined —
+      // e.g. a code mismatch between the masterfile and the translation file)
+      // or it's explicitly listed with 0 rules, that means NO banners should be
+      // created for it — skip entirely rather than falling through to
+      // "no restriction", which used to translate everything unfiltered.
+      if (sizeRules && (sizeRules[lang] === undefined || sizeRules[lang] === null || sizeRules[lang].length === 0)) {
+        console.log("  Skipping " + lang + " — masterfile has 0 size+retailer rules for it");
+        figma.ui.postMessage({ type: "TRANSLATE_PROGRESS", message: lang + ": 0 banners in masterfile, skipped", done: done, total: total, detail: lang + " skipped" });
         done++; continue;
       }
 
@@ -1415,24 +2221,178 @@ figma.ui.onmessage = async function (msg) {
       for (var pi = 0; pi < figma.root.children.length; pi++) {
         if (figma.root.children[pi].name === lang) { targetPage = figma.root.children[pi]; break; }
       }
-      if (!targetPage) {
+      var targetPageIsNew = !targetPage;
+      if (targetPageIsNew) {
         targetPage = figma.createPage();
         targetPage.name = lang;
         console.log("  Created new page: " + lang);
       } else {
-        while (targetPage.children.length > 0) targetPage.children[0].remove();
-        console.log("  Cleared existing page: " + lang);
+        console.log("  Page already exists: " + lang + " (" + targetPage.children.length + " existing frames) — will merge instead of clearing");
+      }
+
+      // Map of existing frame NAME -> node, used to detect collisions with what this
+      // run is about to (re)translate. Rebuilt fresh each language since names are
+      // language-specific (e.g. "..._FR" only collides with a previous FR run).
+      var existingByName = {};
+      // GLOBAL bottom edge across every package combined — used only for the "keep
+      // both" whole-block-shift-down offset below, where we deliberately want the
+      // entire multi-package layout repeated as one cohesive unit under everything.
+      var existingMaxBottomGlobal = 0;
+      // Classify an X coordinate into which detected source package it belongs to
+      // (nearest match if slightly outside a package's range) — used so existing
+      // target-page content gets grouped the same way the source was.
+      function classifyPackageByX(x) {
+        if (!packageRanges || packageRanges.length === 0) return 0;
+        var bestIdx = 0, bestDist = Infinity;
+        for (var pi2 = 0; pi2 < packageRanges.length; pi2++) {
+          var r = packageRanges[pi2];
+          if (x >= r.minX - 1 && x <= r.maxX + 1) return pi2;
+          var dist = x < r.minX ? (r.minX - x) : (x - r.maxX);
+          if (dist < bestDist) { bestDist = dist; bestIdx = pi2; }
+        }
+        return bestIdx;
+      }
+      // Everything below is now keyed by packageIndex so compaction/placement for
+      // one package never bleeds into another — this is what keeps side-by-side
+      // packages side-by-side instead of flattening into one tall column.
+      var existingMaxBottomByPackage = {}; // pkgIndex -> bottom (pre-existing content only, snapshot — never mutated during cloning below)
+      var existingRowMaxRightByPackage = {}; // pkgIndex -> [{ y, maxRight }] (pre-existing rows; entries appended during cloning are record-keeping only — see pkgPreExistingRowCount)
+      var pkgPreExistingRowCount = {}; // pkgIndex -> how many existingRowMaxRightByPackage entries were REAL pre-existing rows (frozen before cloning starts)
+      var framesClonedPerPackage = {}; // pkgIndex -> count, for the end-of-language summary log
+      if (!targetPageIsNew) {
+        for (var epi = 0; epi < targetPage.children.length; epi++) {
+          var epNode = targetPage.children[epi];
+          existingByName[epNode.name] = epNode;
+          var epBottom = epNode.y + epNode.height;
+          if (epBottom > existingMaxBottomGlobal) existingMaxBottomGlobal = epBottom;
+
+          var epPkg = classifyPackageByX(epNode.x);
+          if (existingMaxBottomByPackage[epPkg] === undefined || epBottom > existingMaxBottomByPackage[epPkg]) {
+            existingMaxBottomByPackage[epPkg] = epBottom;
+          }
+          if (!existingRowMaxRightByPackage[epPkg]) existingRowMaxRightByPackage[epPkg] = [];
+          var epRight = epNode.x + epNode.width;
+          var placedInRow = false;
+          var epRowArr = existingRowMaxRightByPackage[epPkg];
+          for (var eri = 0; eri < epRowArr.length; eri++) {
+            if (Math.abs(epNode.y - epRowArr[eri].y) <= ROW_Y_TOLERANCE) {
+              if (epRight > epRowArr[eri].maxRight) epRowArr[eri].maxRight = epRight;
+              placedInRow = true;
+              break;
+            }
+          }
+          if (!placedInRow) epRowArr.push({ y: epNode.y, maxRight: epRight });
+        }
+      }
+      // Sticky choice for this language once the user picks "...all" — avoids asking
+      // once per frame when re-translating many frames at once.
+      var collisionStickyChoice = null; // null | 'override' | 'keep-both'
+
+      // Compute this language's row-Y remap PER PACKAGE: walk each package's own row
+      // groups in original order, skip any row where nothing survives (closing its
+      // gap), and stack that package's surviving rows back-to-back — independently of
+      // every other package, so one package compacting tighter (or not at all) never
+      // shifts a different package's rows.
+      var rowYRemapByPackage = {}; // pkgIndex -> { origY -> compactedY }
+      var compactCursorYByPackage = {}; // pkgIndex -> running cursor while building
+      for (var cr = 0; cr < sourceRows.length; cr++) {
+        var crow = sourceRows[cr];
+        var pkgIdx = crow.packageIndex;
+        var anySurvive = false;
+        for (var cf = 0; cf < crow.frames.length; cf++) {
+          if (frameSurvivesForLang(crow.frames[cf], lang)) { anySurvive = true; break; }
+        }
+        if (!anySurvive) continue;
+        if (!rowYRemapByPackage[pkgIdx]) rowYRemapByPackage[pkgIdx] = {};
+        if (compactCursorYByPackage[pkgIdx] === undefined) compactCursorYByPackage[pkgIdx] = crow.y;
+        rowYRemapByPackage[pkgIdx][crow.y] = compactCursorYByPackage[pkgIdx];
+        compactCursorYByPackage[pkgIdx] += crow.height + ROW_GAP;
+      }
+      // The Y a "keep both" group should be shifted down by, so the whole set of
+      // surviving rows — across every package combined — lands together as one block
+      // starting just below existing content (deliberately global/uniform, unlike the
+      // per-package compaction above, since "keep both" duplicates the ENTIRE layout).
+      var minCompactedYGlobal = null;
+      for (var pkgKey in rowYRemapByPackage) {
+        for (var rowKey in rowYRemapByPackage[pkgKey]) {
+          var vy = rowYRemapByPackage[pkgKey][rowKey];
+          if (minCompactedYGlobal === null || vy < minCompactedYGlobal) minCompactedYGlobal = vy;
+        }
+      }
+      if (minCompactedYGlobal === null) minCompactedYGlobal = 0;
+      // Deliberately much larger than ROW_GAP (the gap between rows WITHIN one
+      // package) — this is the gap BETWEEN the two whole packages, and needs to read
+      // as an obviously bigger break so it's clear a second, separate package starts
+      // here, not just another row of the same one.
+      var PACKAGE_SEPARATION_GAP = 300;
+      var keepBothGroupOffsetY = existingMaxBottomGlobal > 0 ? (existingMaxBottomGlobal + PACKAGE_SEPARATION_GAP - minCompactedYGlobal) : 0;
+
+      // Per-package Y offset for brand-new rows, computed ONCE here — deterministically,
+      // from genuinely pre-existing content only (captured above, BEFORE this run
+      // placed anything). This intentionally does NOT get updated as the clone loop
+      // below runs. An earlier version tracked a "live" existingMaxBottomByPackage that
+      // kept updating as each frame was placed, and used THAT to decide whether a new
+      // row needed to shift down — but sourcePage.children isn't in row order, so
+      // whether an earlier row of the same package had already been processed (and
+      // nudged this counter) by the time a later row's first frame came up was
+      // essentially random layer-order luck. That's exactly why one package could come
+      // out looking different from the others despite identical source rows: some
+      // packages happened to get their rows processed in an order that never tripped
+      // the override, others didn't. Precomputing the offset up front removes that
+      // order-dependency entirely — every row in a package now lands at exactly
+      // computedY + this fixed offset, full stop.
+      var pkgMinCompactedY = {}; // pkgIndex -> earliest compacted Y this run
+      for (var pkgKeyM in rowYRemapByPackage) {
+        for (var rowKeyM in rowYRemapByPackage[pkgKeyM]) {
+          var vym = rowYRemapByPackage[pkgKeyM][rowKeyM];
+          if (pkgMinCompactedY[pkgKeyM] === undefined || vym < pkgMinCompactedY[pkgKeyM]) pkgMinCompactedY[pkgKeyM] = vym;
+        }
+      }
+      var pkgPlacementOffset = {}; // pkgIndex -> fixed Y offset applied to every frame in it
+      for (var pkgKeyO in pkgMinCompactedY) {
+        var preExistingBottom = existingMaxBottomByPackage[pkgKeyO] || 0;
+        pkgPlacementOffset[pkgKeyO] = preExistingBottom > 0 ? (preExistingBottom + ROW_GAP - pkgMinCompactedY[pkgKeyO]) : 0;
       }
 
       // Clone frames
       console.log("  Cloning " + sourcePage.children.length + " frames…");
       for (var fi = 0; fi < sourcePage.children.length; fi++) {
+        if (_stopRequested) {
+          _pausedTranslate = null;
+          console.log("  Stopped by user mid-language (" + lang + "), after " + done + "/" + total + " languages");
+          figma.ui.postMessage({ type: "TRANSLATE_DONE", message: "Stopped during " + lang + " (" + done + "/" + total + " languages complete)" });
+          return;
+        }
         var sourceFrame = sourcePage.children[fi];
         // Skip frames named "Master"
         if (sourceFrame.name.toLowerCase() === "master") {
           console.log("  Skipping Master frame");
           continue;
         }
+        // Check selectedFrameIds FIRST — when the scope came from an actual canvas
+        // selection, only those EXACT frames are in scope, never another frame
+        // elsewhere on the page that merely shares the same WxH (e.g. the same size
+        // duplicated across every side-by-side package). Falls through to the
+        // broader size-only check only when selection wasn't the source of scope
+        // (i.e. the user explicitly checked size boxes in the UI instead).
+        if (selectedFrameIds) {
+          if (!selectedFrameIds[sourceFrame.id]) {
+            console.log("  Skipping " + sourceFrame.name + " — not one of the exact frames selected on canvas");
+            continue;
+          }
+        } else if (selectedSizes && selectedSizes.length > 0) {
+          var fw2 = Math.round(sourceFrame.width);
+          var fh2 = Math.round(sourceFrame.height);
+          var sizeMatch = false;
+          for (var ssi = 0; ssi < selectedSizes.length; ssi++) {
+            if (selectedSizes[ssi].w === fw2 && selectedSizes[ssi].h === fh2) { sizeMatch = true; break; }
+          }
+          if (!sizeMatch) {
+            console.log("  Skipping " + sourceFrame.name + " (" + fw2 + "x" + fh2 + ") — not in selected sizes");
+            continue;
+          }
+        }
+
         // Check sizeRules — filter by BOTH size AND retailer name in frame name
         if (sizeRules && sizeRules[lang] && sizeRules[lang].length > 0) {
           var allowedSizes = sizeRules[lang];
@@ -1468,15 +2428,111 @@ figma.ui.onmessage = async function (msg) {
             continue;
           }
         }
-        var cloned = sourceFrame.clone();
-        targetPage.appendChild(cloned);
-        cloned.x = sourceFrame.x;
-        cloned.y = sourceFrame.y;
-        // Replace language code suffix (e.g. _EN → _DE), or append if not found
+
+        // Compute the intended translated name BEFORE cloning, so we can check for
+        // a collision with a frame already on this page from a previous translate
+        // run of the same language, and decide what to do about it up front.
         var baseName = sourceFrame.name.replace(/([_-])([A-Z]{2})$/i, '');
         var oldLangMatch = sourceFrame.name.match(/[_-]([A-Z]{2})$/i);
         var sep = oldLangMatch ? sourceFrame.name.charAt(sourceFrame.name.length - 3) : '_';
-        cloned.name = baseName + sep + lang;
+        var intendedName = baseName + sep + lang;
+
+        var existingFrame = existingByName[intendedName];
+        var collisionChoice = null;
+        if (existingFrame) {
+          if (collisionStickyChoice) {
+            collisionChoice = collisionStickyChoice;
+          } else {
+            if (_stopRequested) { _pausedTranslate = null; figma.ui.postMessage({ type: "TRANSLATE_DONE", message: "Stopped after " + done + "/" + total + " languages" }); return; }
+            var rawChoice = await askTranslateCollisionChoice(intendedName, lang);
+            if (rawChoice === "__stop__" || _stopRequested) {
+              _pausedTranslate = null;
+              console.log("  Stopped by user while waiting on a collision choice");
+              figma.ui.postMessage({ type: "TRANSLATE_DONE", message: "Stopped after " + done + "/" + total + " languages" });
+              return;
+            }
+            if (rawChoice === "override-all") { collisionChoice = "override"; collisionStickyChoice = "override"; }
+            else if (rawChoice === "keep-both-all") { collisionChoice = "keep-both"; collisionStickyChoice = "keep-both"; }
+            else { collisionChoice = rawChoice; } // 'override' or 'keep-both', this frame only
+          }
+        }
+
+        var cloned = sourceFrame.clone();
+        targetPage.appendChild(cloned);
+        var origRowY = frameRowY[sourceFrame.id];
+        var framePkg = framePackageIndex[sourceFrame.id] !== undefined ? framePackageIndex[sourceFrame.id] : classifyPackageByX(sourceFrame.x);
+        framesClonedPerPackage[framePkg] = (framesClonedPerPackage[framePkg] || 0) + 1;
+        var pkgRowYRemap = rowYRemapByPackage[framePkg] || {};
+        var computedY = (origRowY !== undefined && pkgRowYRemap[origRowY] !== undefined) ? pkgRowYRemap[origRowY] : sourceFrame.y;
+
+        if (existingFrame && collisionChoice === "override") {
+          // Replace in place — remove the old frame and put the new one exactly
+          // where it was, ignoring the freshly computed row position (which is for
+          // brand-new placement, not for replacing something already positioned).
+          cloned.x = existingFrame.x;
+          cloned.y = existingFrame.y;
+          console.log("  Overriding existing frame [" + intendedName + "] in place");
+          try { existingFrame.remove(); } catch (remErr) { console.log("  could not remove existing frame: " + remErr.message); }
+        } else if (existingFrame && collisionChoice === "keep-both") {
+          // Whole new package below the existing one — same relative layout a
+          // normal placement would use (respecting row compaction), just shifted
+          // down as a single block so the entire set stays visually cohesive,
+          // instead of each frame being offset individually beside its own
+          // specific counterpart (which fell apart once frames of different
+          // sizes/rows were involved).
+          cloned.x = sourceFrame.x;
+          cloned.y = computedY + keepBothGroupOffsetY;
+          console.log("  Keeping both — new copy of [" + intendedName + "] placed in a new package below existing content");
+        } else {
+          // No collision — first time this frame's been translated for this
+          // language (or a brand-new size added since the last run). If this
+          // frame's row already has REAL pre-existing content on the target page
+          // (from a previous partial translate run, captured in
+          // existingRowMaxRightByPackage BEFORE this clone loop started), place it
+          // beside the last banner in that row instead of at its raw source X —
+          // otherwise a newly-added size could land right on top of whatever's
+          // already there.
+          //
+          // IMPORTANT: this "snap beside" matching must NEVER fire against a row
+          // entry that was itself created during THIS SAME clone loop (i.e. by an
+          // earlier sibling frame from this very run). sourcePage.children isn't in
+          // left-to-right X order, so whichever frame in a row happened to get
+          // processed first would become an "anchor," and every later sibling would
+          // get shoved to anchor.right+60 — discarding its own correct original X
+          // and scattering the row based on arbitrary layer order. Frames within the
+          // same run should always just keep their original relative X; the source
+          // row's spacing is already correct as-is. pkgPreExistingRowCount freezes
+          // how many entries were REAL pre-existing rows, so only THOSE are eligible
+          // to snap against — anything appended below that during this run is
+          // record-keeping only, never a snap target.
+          //
+          // The Y itself is simply computedY shifted by this package's ONE fixed,
+          // precomputed offset (pkgPlacementOffset) — deterministic and the same
+          // for every frame in this package, regardless of what order
+          // sourcePage.children happens to process them in.
+          if (!existingRowMaxRightByPackage[framePkg]) existingRowMaxRightByPackage[framePkg] = [];
+          var pkgRowMaxRight = existingRowMaxRightByPackage[framePkg];
+          if (pkgPreExistingRowCount[framePkg] === undefined) pkgPreExistingRowCount[framePkg] = pkgRowMaxRight.length;
+          var offsetY = pkgPlacementOffset[framePkg] || 0;
+
+          cloned.x = sourceFrame.x;
+          cloned.y = computedY + offsetY;
+          var placedBesideRow = false;
+          for (var eri2 = 0; eri2 < pkgPreExistingRowCount[framePkg]; eri2++) {
+            if (Math.abs(cloned.y - pkgRowMaxRight[eri2].y) <= ROW_Y_TOLERANCE) {
+              cloned.x = pkgRowMaxRight[eri2].maxRight + 60;
+              cloned.y = pkgRowMaxRight[eri2].y; // snap to the row's ACTUAL Y for exact alignment
+              pkgRowMaxRight[eri2].maxRight = cloned.x + cloned.width;
+              placedBesideRow = true;
+              console.log("  New size [" + intendedName + "] placed beside the last existing banner in its row");
+              break;
+            }
+          }
+          if (!placedBesideRow) {
+            pkgRowMaxRight.push({ y: cloned.y, maxRight: cloned.x + cloned.width });
+          }
+        }
+        cloned.name = intendedName;
         console.log("  Frame [" + cloned.name + "] cloned");
 
         // Replace text
@@ -1517,8 +2573,9 @@ figma.ui.onmessage = async function (msg) {
                   for (var fkey in fonts) { await figma.loadFontAsync(fonts[fkey]); }
                 }
 
-                // Snapshot original character styles (font, size) before replacing
+                // Snapshot original character styles (font, size, lineHeight) before replacing
                 var origLen = textNode.characters.length;
+                var origLineHeight = textNode.lineHeight; // snapshot node-level lineHeight
                 var charStyles = [];
                 for (var si = 0; si < origLen; si++) {
                   charStyles.push({
@@ -1531,8 +2588,14 @@ figma.ui.onmessage = async function (msg) {
                 textNode.characters = translatedText;
                 var newLen = textNode.characters.length;
 
-                // Reapply character styles proportionally
-                // Map each new char position to original proportionally
+                // Calculate font scale ratio based on text length change
+                // Longer translation → smaller font, shorter → bigger font
+                // Capped between 70% and 130% of original size
+                var lengthRatio = origLen > 0 ? origLen / newLen : 1;
+                var fontScale = Math.max(0.70, Math.min(1.30, lengthRatio));
+                console.log("    font scale: " + origLen + " EN chars → " + newLen + " translated chars, scale=" + fontScale.toFixed(2));
+
+                // Reapply character styles with scaled font size
                 for (var ni = 0; ni < newLen; ni++) {
                   var origIdx = Math.min(Math.round(ni / newLen * origLen), origLen - 1);
                   var style = charStyles[origIdx];
@@ -1542,10 +2605,23 @@ figma.ui.onmessage = async function (msg) {
                       textNode.setRangeFontName(ni, ni + 1, style.font);
                     }
                     if (style && typeof style.size === 'number') {
-                      textNode.setRangeFontSize(ni, ni + 1, style.size);
+                      var scaledSize = Math.round(style.size * fontScale);
+                      scaledSize = Math.max(10, scaledSize);
+                      textNode.setRangeFontSize(ni, ni + 1, scaledSize);
                     }
                   } catch (e) { }
                 }
+
+                // Scale line-height by same ratio (only for PIXELS unit)
+                try {
+                  var lh = origLineHeight;
+                  if (lh && lh !== figma.mixed && lh.unit === 'PIXELS') {
+                    var scaledLH = Math.round(lh.value * fontScale);
+                    scaledLH = Math.max(14, scaledLH);
+                    textNode.lineHeight = { unit: 'PIXELS', value: scaledLH };
+                    console.log("    lineHeight: " + lh.value + " → " + scaledLH);
+                  }
+                } catch (e) { }
 
                 console.log("    ✓ Set [" + targetName + "] = " + translatedText.substring(0, 30));
                 found = true;
@@ -1589,45 +2665,53 @@ figma.ui.onmessage = async function (msg) {
         }
       }
 
-      // ── REALIGN: place frames in clean non-overlapping rows ───────────
-      var translatedFrames = [];
+      // ── SET CTA AND CHILDREN TO HUG WIDTH (after translation) ─────────
       for (var fi = 0; fi < targetPage.children.length; fi++) {
         var tf = targetPage.children[fi];
-        if (tf.type === "FRAME" || tf.type === "COMPONENT" || tf.type === "INSTANCE") {
-          translatedFrames.push(tf);
+        if (!tf.findAll) continue;
+        var ctaNodes = tf.findAll(function (n) {
+          return n.name.toLowerCase().indexOf("cta") !== -1;
+        });
+        for (var ci = 0; ci < ctaNodes.length; ci++) {
+          var ctaNode = ctaNodes[ci];
+          try {
+            var ctaLocked = ctaNode.locked;
+            if (ctaLocked) ctaNode.locked = false;
+            if (ctaNode.layoutSizingHorizontal !== undefined) ctaNode.layoutSizingHorizontal = "HUG";
+            if (ctaLocked) ctaNode.locked = true;
+          } catch (e) { }
+          if (!ctaNode.findAll) continue;
+          var ctaKids = ctaNode.findAll(function (c) { return true; });
+          for (var ki = 0; ki < ctaKids.length; ki++) {
+            try {
+              var kLocked = ctaKids[ki].locked;
+              if (kLocked) ctaKids[ki].locked = false;
+              if (ctaKids[ki].layoutSizingHorizontal !== undefined) ctaKids[ki].layoutSizingHorizontal = "HUG";
+              if (kLocked) ctaKids[ki].locked = true;
+            } catch (e) { }
+          }
         }
       }
 
-      if (translatedFrames.length > 0) {
-        var GAP = 100;   // gap between frames
-        var START_X = 100, START_Y = 100;
-        var MAX_ROW_W = 10000; // max row width before wrapping
+      // Note: frame positions are already set above (cloned.x = sourceFrame.x,
+      // cloned.y = sourceFrame.y), which exactly preserves the EN page's layout —
+      // including the side-by-side template packages. A "REALIGN" step used to run
+      // here and re-flow every frame into a generic 5-per-row grid, which discarded
+      // that layout entirely and collapsed everything into one long stacked column.
+      // Removed so translated pages keep the same alignment as EN.
 
-        // Keep original order, 5 banners per row
-        var rows = [], curRow = [];
-        for (var fi = 0; fi < translatedFrames.length; fi++) {
-          curRow.push(translatedFrames[fi]);
-          if (curRow.length === 5) { rows.push(curRow); curRow = []; }
+      console.log("  Package summary for " + lang + ":");
+      var actualBottomByPackage = {};
+      for (var sumTfi = 0; sumTfi < targetPage.children.length; sumTfi++) {
+        var sumTf = targetPage.children[sumTfi];
+        var sumPkg = classifyPackageByX(sumTf.x);
+        var sumBottom = sumTf.y + sumTf.height;
+        if (actualBottomByPackage[sumPkg] === undefined || sumBottom > actualBottomByPackage[sumPkg]) {
+          actualBottomByPackage[sumPkg] = sumBottom;
         }
-        if (curRow.length > 0) rows.push(curRow);
-
-        // Place each row
-        var curY = START_Y;
-        for (var ri = 0; ri < rows.length; ri++) {
-          var row = rows[ri];
-          var rowH = 0;
-          for (var fi = 0; fi < row.length; fi++) {
-            rowH = Math.max(rowH, Math.round(row[fi].height));
-          }
-          var curX = START_X;
-          for (var fi = 0; fi < row.length; fi++) {
-            row[fi].x = curX;
-            row[fi].y = curY;
-            curX += Math.round(row[fi].width) + GAP;
-          }
-          curY += rowH + GAP;
-        }
-        console.log("  Placed " + translatedFrames.length + " frames in " + rows.length + " rows");
+      }
+      for (var sumPkgI = 0; sumPkgI < packageRanges.length; sumPkgI++) {
+        console.log("    package[" + sumPkgI + "] framesCloned=" + (framesClonedPerPackage[sumPkgI] || 0) + " finalBottomY=" + Math.round(actualBottomByPackage[sumPkgI] || 0));
       }
 
       done++;
@@ -1654,15 +2738,53 @@ figma.ui.onmessage = async function (msg) {
   }
 
   if (msg.type === "EXPORT_BANNERS") {
+    _stopRequested = false;
+    _pauseRequested = false;
+    _pausedExport = null;
     var scope = msg.scope;
     var format = msg.format;
     var scale = msg.scale || 1;
     var languages = msg.languages || [];
-    var setting = { format: format, constraint: { type: "SCALE", value: scale } };
+    var groupByRetailer = !!msg.groupByRetailer;
 
     function isMasterFrame(name) { return /local[_\s]?master/i.test(name); }
 
-    console.log("=== EXPORT START scope=" + scope + " format=" + format + " scale=" + scale + " langs=" + languages.join(','));
+    // Extract the "group" segment from a frame name — the token immediately before
+    // the WxH size, e.g. "Growline" in "EMEA_Nighti-26_Web-banners_Babymarkt.de_
+    // Growline_600x350_DE", or "Image-1" in "..._Image-1_1920x1080px_EN". Splitting
+    // on underscores (rather than a single regex) keeps hyphenated tokens like
+    // "Image-1" intact instead of chopping them at the hyphen.
+    function extractGroupSegment(name) {
+      var segments = name.split('_');
+      for (var gi = 1; gi < segments.length; gi++) {
+        if (/^\d+\s*[x\u00D7]\s*\d+(?:px)?$/i.test(segments[gi])) {
+          return segments[gi - 1] || null;
+        }
+      }
+      return null;
+    }
+
+    // Extract the RETAILER segment — the token right before the "AdN" slot (e.g.
+    // "Babywalz.de" in "..._Babywalz.de_Ad4_1080x1920_FR"), skipping over a "T2"-style
+    // test-variant marker if one sits between the retailer and "AdN". Only meaningful
+    // for this campaign's naming convention (retailer_[T#_]AdN_WxH_LANG); returns null
+    // for names that don't follow it, so grouping gracefully falls back to no retailer
+    // subfolder rather than guessing wrong.
+    function extractRetailerSegment(name) {
+      var segments = name.split('_');
+      var adIdx = -1;
+      for (var ai = 0; ai < segments.length; ai++) {
+        if (/^Ad\d+$/i.test(segments[ai])) { adIdx = ai; break; }
+      }
+      if (adIdx === -1) return null;
+      var retailerIdx = adIdx - 1;
+      if (retailerIdx >= 0 && /^T\d+$/i.test(segments[retailerIdx])) retailerIdx -= 1; // skip "T2" etc.
+      return retailerIdx >= 0 ? segments[retailerIdx] : null;
+    }
+
+    console.log("=== EXPORT START scope=" + scope + " format=" + format + " scale=" + scale + " langs=" + languages.join(',') + " groupByRetailer=" + groupByRetailer);
+
+    var tasks = []; // flat list of { node, folder } to export, in order
 
     if (scope === "selected") {
       var sel = figma.currentPage.selection;
@@ -1703,25 +2825,17 @@ figma.ui.onmessage = async function (msg) {
         console.log("[export] exporting " + exportNodes.length + " children of single wrapper");
       }
 
-      var total = exportNodes.length; var done = 0;
-      console.log("[export] total frames to export: " + total + " (from " + sel.length + " selected)");
-      figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting " + total + " frames…", done: 0, total: total, detail: "Starting…" });
-
-      for (var i = 0; i < exportNodes.length; i++) {
-        var node = exportNodes[i];
-        try {
-          console.log("[export] " + (i + 1) + "/" + total + ": " + node.name);
-          var bytes = await node.exportAsync({ format: format === "PDF" ? "PNG" : format, constraint: { type: "SCALE", value: scale } });
-          var _ext1 = (format === "JPG") ? ".jpg" : ".png";
-          figma.ui.postMessage({ type: "EXPORT_FILE", name: node.name + _ext1, bytes: bytes, folder: "", format: format, width: Math.round(node.width * scale), height: Math.round(node.height * scale) });
-          done++;
-          figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "✓ " + node.name });
-        } catch (e) {
-          console.error("[export] FAILED: " + node.name + " — " + (e.message || e));
-          figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "✗ " + node.name + ": " + (e.message || "error") });
+      console.log("[export] total frames to export: " + exportNodes.length + " (from " + sel.length + " selected)");
+      for (var eni = 0; eni < exportNodes.length; eni++) {
+        var enNode = exportNodes[eni];
+        var enGroup = extractGroupSegment(enNode.name);
+        var enFolder = enGroup || "";
+        if (groupByRetailer) {
+          var enRetailer = extractRetailerSegment(enNode.name);
+          if (enRetailer) enFolder = enFolder ? (enFolder + "/" + enRetailer) : enRetailer;
         }
+        tasks.push({ node: enNode, folder: enFolder });
       }
-      figma.ui.postMessage({ type: "EXPORT_DONE", message: "✓ Exported " + done + "/" + total + " frames", format: format });
 
     } else {
       // Must load all pages first with dynamic-page access
@@ -1738,53 +2852,42 @@ figma.ui.onmessage = async function (msg) {
       }
       console.log("Selected pages: " + selectedPages.map(function (p) { return p.name; }).join(', '));
 
-      var total = 0;
-      for (var pi = 0; pi < selectedPages.length; pi++) {
-        for (var fi = 0; fi < selectedPages[pi].children.length; fi++) {
-          if (!isMasterFrame(selectedPages[pi].children[fi].name)) total++;
-        }
-      }
-      console.log("Total exportable frames: " + total);
-      figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting " + selectedPages.length + " pages…", done: 0, total: total, detail: "Loading pages: " + selectedPages.map(function (p) { return p.name; }).join(', ') });
-
-      var done = 0;
-      for (var pi = 0; pi < selectedPages.length; pi++) {
-        var page = selectedPages[pi];
-        var folder = page.name;
-        console.log("Page: " + folder + " (" + page.children.length + " frames)");
-        figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "📁 " + folder + " (" + page.children.length + " frames)" });
+      for (var pi2 = 0; pi2 < selectedPages.length; pi2++) {
+        var page = selectedPages[pi2];
         for (var fi = 0; fi < page.children.length; fi++) {
-          var node = page.children[fi];
-          if (isMasterFrame(node.name)) {
-            console.log("  Skip master: " + node.name);
-            figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "⏭ skip: " + node.name });
+          if (isMasterFrame(page.children[fi].name)) {
+            console.log("  Skip master: " + page.children[fi].name);
             continue;
           }
-          try {
-            console.log("  Export: " + folder + "/" + node.name);
-            var bytes = await node.exportAsync({ format: format === "PDF" ? "PNG" : format, constraint: { type: "SCALE", value: scale } });
-            figma.ui.postMessage({
-              type: "EXPORT_FILE",
-              name: node.name + ((format === "JPG") ? ".jpg" : ".png"),
-              bytes,
-              folder,
-              format,
-              width: Math.round(node.width * scale),
-              height: Math.round(node.height * scale),
-              x: Math.round(node.x),
-              y: Math.round(node.y)
-            });
-            done++;
-            figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "✓ " + folder + "/" + node.name });
-          } catch (e) {
-            console.error("  Failed: " + node.name, e);
-            figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting…", done: done, total: total, detail: "✗ " + node.name + ": " + e.message });
+          var pageFrameNode = page.children[fi];
+          var pageGroup = extractGroupSegment(pageFrameNode.name);
+          var pageFolder = pageGroup ? (page.name + "/" + pageGroup) : page.name;
+          if (groupByRetailer) {
+            var pageRetailer = extractRetailerSegment(pageFrameNode.name);
+            if (pageRetailer) pageFolder = pageFolder + "/" + pageRetailer;
           }
+          tasks.push({ node: pageFrameNode, folder: pageFolder });
         }
       }
-      figma.ui.postMessage({ type: "EXPORT_DONE", message: "✓ Exported " + done + "/" + total + " from " + selectedPages.length + " pages", format: format });
+      console.log("Total exportable frames: " + tasks.length);
     }
-    console.log("=== EXPORT DONE ===");
+
+    figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Exporting " + tasks.length + " frames…", done: 0, total: tasks.length, detail: "Starting…" });
+    await runExportQueue(tasks, format, scale, { startIndex: 0, done: 0, total: tasks.length });
+    return;
+  }
+
+  if (msg.type === "CONTINUE_EXPORT") {
+    if (!_pausedExport) {
+      figma.ui.postMessage({ type: "EXPORT_ERROR", message: "Nothing to continue — no paused export found." });
+      return;
+    }
+    _stopRequested = false;
+    _pauseRequested = false;
+    var pe = _pausedExport;
+    _pausedExport = null;
+    figma.ui.postMessage({ type: "EXPORT_PROGRESS", message: "Resuming export — " + (pe.total - pe.startIndex) + " frames left…", done: pe.done, total: pe.total, detail: "Resuming…" });
+    await runExportQueue(pe.tasks, pe.format, pe.scale, { startIndex: pe.startIndex, done: pe.done, total: pe.total });
     return;
   }
 };

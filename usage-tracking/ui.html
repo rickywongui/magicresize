@@ -93,6 +93,29 @@
   .map-btn.selecting { border-color: var(--accent); color: var(--accent2); animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
   .progress { font-size: 11px; color: var(--accent2); margin-top: 4px; }
+
+  /* License overlay */
+  .license-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.75);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000; padding: 20px;
+  }
+  .license-overlay.hidden { display: none; }
+  /* Applied to #appContent whenever the license isn't valid — disables interaction with
+     every control underneath directly (not just relying on the overlay's own z-index to
+     visually block clicks), so even tampering with the overlay's display/visibility can't
+     expose working functionality. */
+  #appContent.app-locked { pointer-events: none; opacity: 0.35; user-select: none; }
+  .license-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 20px; width: 100%; max-width: 280px; text-align: center;
+  }
+  .license-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .license-sub { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+  #licenseInput { text-align: center; letter-spacing: .03em; }
+  .license-status { font-size: 11px; margin-top: 10px; min-height: 14px; }
+  .license-status.error { color: var(--error); }
+  .license-status.checking { color: var(--muted); }
 </style>
     <script
       src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -103,232 +126,368 @@
   </head>
   <body>
 
-    <div class="header">
-      <div class="header-icon">🎨</div>
-      <div>
-        <div class="header-title">Banner Resizer</div>
-        <div class="header-sub">Select your banner frame, then enter sizes</div>
+    <!-- License gate overlay: covers the UI until a valid key is confirmed -->
+    <div id="licenseOverlay" class="license-overlay">
+      <div class="license-card">
+        <div class="header-icon" style="margin: 0 auto 10px;">🔒</div>
+        <div class="license-title">License required</div>
+        <div class="license-sub">Enter your license key to use Banner
+          Resizer.<br>Each key activates on one machine.</div>
+        <input type="text" id="licenseInput" placeholder="MR-XXXX-XXXX-XXXX" />
+        <button class="btn btn-primary" id="licenseSubmit"
+          style="margin-top: 8px;">Unlock</button>
+        <div class="license-status" id="licenseStatus"></div>
       </div>
     </div>
 
-    <!-- Template selector — only shown if templates exist on the page -->
-    <div class="template-row" id="templateRow" style="display:none">
-      <div class="section-label" style="margin-bottom:0">Template</div>
-      <div class="template-select-wrap">
-        <select id="templateSelect">
-          <option value>— Select a template —</option>
-        </select>
-        <button id="refreshTemplates" title="Refresh templates">↺</button>
-      </div>
-    </div>
-
-    <!-- Selection card -->
-    <div class="sel-card" id="selCard">
-      <div class="card-row">
-        <div class="dot" id="selDot"></div>
-        <div class="card-name" id="selName">← Select a frame on the canvas</div>
-        <div class="card-size" id="selSize"></div>
-      </div>
-      <div class="card-sub" id="selSub"></div>
-      <div class="variants-wrap" id="variantsWrap" style="display:none">
-        <div class="variants-label">Component Set variants</div>
-        <div class="variants-list" id="variantsList"></div>
-      </div>
-    </div>
-
-    <!-- Mode tabs -->
-    <div class="tabs">
-      <div class="tab active" id="tabSingle">Single</div>
-      <div class="tab" id="tabBatch">Batch</div>
-      <div class="tab" id="tabTranslate">Translate</div>
-      <div class="tab" id="tabExport">Export</div>
-    </div>
-
-    <!-- Single mode -->
-    <div id="modeSingle">
-      <div class="size-form">
-        <div class="dimension-row">
-          <div>
-            <div class="dim-label">Width (px)</div>
-            <input type="number" id="widthInput" placeholder="e.g. 700"
-              min="1" />
-          </div>
-          <div class="dim-sep">×</div>
-          <div>
-            <div class="dim-label">Height (px)</div>
-            <input type="number" id="heightInput" placeholder="e.g. 1200"
-              min="1" />
-          </div>
+    <!-- Duplicate filename modal: shown during export when two files would collide -->
+    <div id="duplicateFileModal" class="license-overlay hidden">
+      <div class="license-card">
+        <div class="header-icon" style="margin: 0 auto 10px;">⚠️</div>
+        <div class="license-title">File already exists</div>
+        <div class="license-sub" style="word-break:break-all">
+          <span id="duplicateFileName"></span> already exists in this export.
         </div>
-        <div class="ratio-hint" id="ratioHint"></div>
-        <div style="margin-top:10px">
-          <div class="dim-label">Frame label (optional)</div>
-          <input type="text" id="labelInput" placeholder="e.g. Mobile Story" />
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn" id="dupReplaceBtn"
+            style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text)">Replace</button>
+          <button class="btn btn-primary" id="dupKeepBtn" style="flex:1">Keep
+            both</button>
         </div>
       </div>
     </div>
 
-    <!-- Batch mode -->
-    <div id="modeBatch" style="display:none">
-      <div class="size-form">
-        <div class="dim-label" style="margin-bottom:6px">Paste sizes — one per
-          line</div>
-        <textarea id="batchInput"
-          placeholder="Pierre Jeannin&#9;16012&#9;AUBERT&#9;1100&#9;400&#10;&#9;&#9;&#9;1360&#9;600&#10;&#9;&#9;&#9;1170&#9;130&#10;&#10;Or simple sizes:&#10;1080x1920&#10;300x600"></textarea>
-        <div class="batch-hint">First row text columns become the name prefix:
-          <span>Pierre_Jeannin_16012_AUBERT_1100x400</span></div>
-        <div class="batch-count" id="batchCount"></div>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
-          <div class="dim-label" style="margin:0;white-space:nowrap">Banners per
-            row</div>
-          <input type="number" id="bannersPerRow" value="5" min="1" max="20"
-            style="width:60px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:13px;text-align:center" />
+    <!-- Translate collision modal: shown when a frame with this exact translated name
+         already exists on the target language page from a previous translate run -->
+    <div id="translateCollisionModal" class="license-overlay hidden">
+      <div class="license-card">
+        <div class="header-icon" style="margin: 0 auto 10px;">⚠️</div>
+        <div class="license-title">Banner already exists</div>
+        <div class="license-sub" style="word-break:break-all">
+          <span id="collisionFrameName"></span> already exists on the
+          <span id="collisionLang"></span> page.
         </div>
-      </div>
-    </div>
-
-    <!-- Export mode -->
-    <div id="modeExport" style="display:none">
-      <div class="size-form" style="margin-bottom:10px">
-        <div class="dim-label" style="margin-bottom:8px">Export scope</div>
-        <div style="display:flex;flex-direction:column;gap:6px">
-          <label
-            style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
-            <input type="radio" name="exportScope" value="selected"
-              id="exportSelected" checked />
-            <span>Selected frames only</span>
-          </label>
-          <label
-            style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
-            <input type="radio" name="exportScope" value="all" id="exportAll" />
-            <span>All banners — by language page</span>
-          </label>
-        </div>
-      </div>
-
-      <!-- Language list — shown when "All banners" is selected -->
-      <div id="exportLangSection" style="display:none;margin-bottom:10px">
-        <div class="size-form">
-          <div class="dim-label" style="margin-bottom:6px">Select languages to
-            export</div>
-          <div class="lang-row">
-            <label class="lang-chip" id="exportLangAll">
-              <input type="checkbox" id="exportCheckAll" checked /> All
-            </label>
-          </div>
-          <div class="lang-list" id="exportLangList"
-            style="margin-top:6px"></div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px">Frames
-            with <code>local_master</code> in the name are skipped</div>
-        </div>
-      </div>
-
-      <div class="size-form" style="margin-bottom:10px">
-        <div class="dim-label" style="margin-bottom:8px">Format</div>
-        <div style="display:flex;gap:8px">
-          <label class="lang-chip"><input type="radio" name="exportFormat"
-              value="PNG" id="fmtPNG" checked /> PNG</label>
-          <label class="lang-chip"><input type="radio" name="exportFormat"
-              value="JPG" id="fmtJPG" /> JPG</label>
-          <label class="lang-chip"><input type="radio" name="exportFormat"
-              value="PDF" id="fmtPDF" /> PDF</label>
-        </div>
-      </div>
-
-      <div class="size-form" style="margin-bottom:10px" id="scaleRow">
-        <div style="display:flex;align-items:center;gap:8px">
-          <div class="dim-label" style="margin:0;white-space:nowrap">Scale</div>
-          <select id="exportScale"
-            style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:12px">
-            <option value="1">1× (actual size)</option>
-            <option value="2">2× (retina)</option>
-            <option value="0.5">0.5×</option>
-          </select>
-        </div>
-      </div>
-
-      <div id="compressRow" class="size-form"
-        style="margin-bottom:6px;display:none">
         <label
-          style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
-          <input type="checkbox" id="compressBelow150"
-            style="width:14px;height:14px" />
-          Compress images below 150kb
+          style="display:flex;align-items:center;gap:6px;margin-top:10px;font-size:12px;color:var(--text-muted,#888);cursor:pointer">
+          <input type="checkbox" id="collisionApplyAll" />
+          Apply to all remaining conflicts in this language
         </label>
-        <div
-          style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
-          Re-encodes as JPEG, reducing quality until &lt; 150kb. Best for web
-          use.
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="btn" id="collisionOverrideBtn"
+            style="flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text)">Override</button>
+          <button class="btn btn-primary" id="collisionKeepBtn"
+            style="flex:1">Keep both</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Everything below is the actual app content. Wrapped so it can be locked out via
+         pointer-events (not just visually obscured by the license overlay above) — a
+         defense-in-depth measure: even if the overlay's own display/visibility were tampered
+         with directly, the real controls underneath still couldn't be clicked. -->
+    <div id="appContent" class="app-locked">
+
+      <div class="header">
+        <div class="header-icon">🎨</div>
+        <div style="flex:1">
+          <div class="header-title">Banner Resizer</div>
+          <div class="header-sub">Select your banner frame, then enter
+            sizes</div>
+        </div>
+        <button id="resetAppBtn" title="Reset app — clears all tabs"
+          style="background:none;border:none;cursor:pointer;font-size:16px;padding:4px;line-height:1;color:var(--text-muted,#888)">↺</button>
+      </div>
+
+      <!-- Template selector — only shown if templates exist on the page -->
+      <div class="template-row" id="templateRow" style="display:none">
+        <div class="section-label" style="margin-bottom:0">Template</div>
+        <div class="template-select-wrap">
+          <select id="templateSelect">
+            <option value>— Select a template —</option>
+          </select>
+          <button id="refreshTemplates" title="Refresh templates">↺</button>
         </div>
       </div>
 
-      <div class="export-info" id="exportInfo"
-        style="font-size:11px;color:var(--muted);min-height:16px;margin-bottom:4px"></div>
-
-      <!-- Export log -->
-      <div id="exportLog"
-        style="display:none;max-height:120px;overflow-y:auto;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:10px;color:var(--muted);font-family:monospace;margin-top:6px"></div>
-    </div>
-
-    <!-- Translate mode -->
-    <div id="modeTranslate" style="display:none">
-      <div class="size-form" style="margin-bottom:10px">
-        <div class="dim-label" style="margin-bottom:6px">1. Upload translation
-          Excel file</div>
-        <label class="upload-btn" id="uploadLabel">
-          📂 Choose Excel file (.xlsx)
-          <input type="file" id="xlsxInput" accept=".xlsx"
-            style="display:none" />
-        </label>
-        <div class="upload-status" id="uploadStatus"></div>
+      <!-- Selection card -->
+      <div class="sel-card" id="selCard">
+        <div class="card-row">
+          <div class="dot" id="selDot"></div>
+          <div class="card-name" id="selName">← Select a frame on the
+            canvas</div>
+          <div class="card-size" id="selSize"></div>
+        </div>
+        <div class="card-sub" id="selSub"></div>
+        <div class="variants-wrap" id="variantsWrap" style="display:none">
+          <div class="variants-label">Component Set variants</div>
+          <div class="variants-list" id="variantsList"></div>
+        </div>
       </div>
 
-      <!-- Optional masterfile upload -->
-      <div class="size-form" style="margin-bottom:10px">
-        <div class="dim-label" style="margin-bottom:6px">2. (Optional) Upload
-          masterfile
-          <span style="color:var(--muted);font-weight:400"> — controls which
-            sizes per language</span></div>
-        <label class="upload-btn" id="masterfileLabel">
-          📂 Choose Masterfile Excel (.xlsx)
-          <input type="file" id="masterfileInput" accept=".xlsx"
-            style="display:none" />
-        </label>
-        <div class="upload-status" id="masterfileStatus"></div>
+      <!-- Mode tabs -->
+      <div class="tabs">
+        <div class="tab active" id="tabSingle">Single</div>
+        <div class="tab" id="tabBatch">Batch</div>
+        <div class="tab" id="tabTranslate">Translate</div>
+        <div class="tab" id="tabExport">Export</div>
       </div>
 
-      <div id="translateConfig" style="display:none">
-        <!-- Language selection -->
-        <div class="size-form" style="margin-bottom:10px">
-          <div class="dim-label" style="margin-bottom:6px">3. Select
-            languages</div>
-          <div class="lang-row">
-            <label class="lang-chip" id="langAll">
-              <input type="checkbox" id="checkAll" /> All
+      <!-- Single mode -->
+      <div id="modeSingle">
+        <div class="size-form">
+          <div class="dimension-row">
+            <div>
+              <div class="dim-label">Width (px)</div>
+              <input type="number" id="widthInput" placeholder="e.g. 700"
+                min="1" />
+            </div>
+            <div class="dim-sep">×</div>
+            <div>
+              <div class="dim-label">Height (px)</div>
+              <input type="number" id="heightInput" placeholder="e.g. 1200"
+                min="1" />
+            </div>
+          </div>
+          <div class="ratio-hint" id="ratioHint"></div>
+          <div style="margin-top:10px">
+            <div class="dim-label">Frame label (optional)</div>
+            <input type="text" id="labelInput"
+              placeholder="e.g. Mobile Story" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Batch mode -->
+      <div id="modeBatch" style="display:none">
+        <div class="size-form">
+          <div class="dim-label" style="margin-bottom:6px">Paste sizes — one per
+            line</div>
+          <textarea id="batchInput"
+            placeholder="Pierre Jeannin&#9;16012&#9;AUBERT&#9;1100&#9;400&#10;&#9;&#9;&#9;1360&#9;600&#10;&#9;&#9;&#9;1170&#9;130&#10;&#10;Or simple sizes:&#10;1080x1920&#10;300x600"></textarea>
+          <div class="batch-hint">First row text columns become the name prefix:
+            <span>Pierre_Jeannin_16012_AUBERT_1100x400</span></div>
+          <div class="batch-count" id="batchCount"></div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+            <div class="dim-label" style="margin:0;white-space:nowrap">Banners
+              per
+              row</div>
+            <input type="number" id="bannersPerRow" value="5" min="1" max="20"
+              style="width:60px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:13px;text-align:center" />
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+            <label
+              style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+              <input type="checkbox" id="retailerBreakLine" />
+              <span>Retailer break line</span>
             </label>
           </div>
-          <div class="lang-list" id="langList"></div>
-          <div id="translateBannerCount"
-            style="font-size:11px;color:var(--muted);margin-top:6px"></div>
-        </div>
-
-        <!-- Text mapping -->
-        <div class="size-form" style="margin-bottom:10px">
-          <div class="dim-label" style="margin-bottom:6px">3. Map text layers —
-            select a layer on canvas, then click a field to connect</div>
-          <div class="mapping-list" id="mappingList"></div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:10px">
+            <label
+              style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer">
+              <input type="checkbox" id="verticalLayout" />
+              <span>Vertical layout (stack this template's banners in one column
+                below the master, instead of packing into rows)</span>
+            </label>
+          </div>
         </div>
       </div>
-    </div>
 
-    <button class="btn btn-primary" id="createBtn" disabled>
-      <span id="btnLabel">Create banner</span>
-    </button>
-    <div class="status" id="status"></div>
-    <div class="progress-bar-wrap" id="progressBarWrap">
-      <div class="progress-bar-fill" id="progressBarFill"></div>
-    </div>
-    <div class="progress-label" id="progressEl"></div>
+      <!-- Export mode -->
+      <div id="modeExport" style="display:none">
+        <div class="size-form" style="margin-bottom:10px">
+          <div class="dim-label" style="margin-bottom:8px">Export scope</div>
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <label
+              style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+              <input type="radio" name="exportScope" value="selected"
+                id="exportSelected" checked />
+              <span>Selected frames only</span>
+            </label>
+            <label
+              style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer">
+              <input type="radio" name="exportScope" value="all"
+                id="exportAll" />
+              <span>All banners — by language page</span>
+            </label>
+          </div>
+        </div>
+
+        <!-- Language list — shown when "All banners" is selected -->
+        <div id="exportLangSection" style="display:none;margin-bottom:10px">
+          <div class="size-form">
+            <div class="dim-label" style="margin-bottom:6px">Select languages to
+              export</div>
+            <div class="lang-row">
+              <label class="lang-chip" id="exportLangAll">
+                <input type="checkbox" id="exportCheckAll" checked /> All
+              </label>
+            </div>
+            <div class="lang-list" id="exportLangList"
+              style="margin-top:6px"></div>
+            <div style="font-size:10px;color:var(--muted);margin-top:4px">Frames
+              with <code>local_master</code> in the name are skipped</div>
+          </div>
+        </div>
+
+        <div class="size-form" style="margin-bottom:10px">
+          <div class="dim-label" style="margin-bottom:8px">Format</div>
+          <div style="display:flex;gap:8px">
+            <label class="lang-chip"><input type="radio" name="exportFormat"
+                value="PNG" id="fmtPNG" checked /> PNG</label>
+            <label class="lang-chip"><input type="radio" name="exportFormat"
+                value="JPG" id="fmtJPG" /> JPG</label>
+            <label class="lang-chip"><input type="radio" name="exportFormat"
+                value="PDF" id="fmtPDF" /> PDF</label>
+          </div>
+        </div>
+
+        <div class="size-form" style="margin-bottom:10px" id="scaleRow">
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="dim-label"
+              style="margin:0;white-space:nowrap">Scale</div>
+            <select id="exportScale"
+              style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:12px">
+              <option value="1">1× (actual size)</option>
+              <option value="2">2× (retina)</option>
+              <option value="0.5">0.5×</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="size-form" style="margin-bottom:10px"
+          id="groupByTemplateRow">
+          <label
+            style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
+            <input type="checkbox" id="groupByTemplate"
+              style="width:14px;height:14px" />
+            Group by template
+          </label>
+          <div
+            style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
+            Adds a template-level subfolder, e.g. <code>fr/Ad4/…</code>
+          </div>
+        </div>
+
+        <div class="size-form" style="margin-bottom:10px"
+          id="groupByRetailerRow">
+          <label
+            style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
+            <input type="checkbox" id="groupByRetailer"
+              style="width:14px;height:14px" />
+            Group by retailer
+          </label>
+          <div
+            style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
+            Nests by retailer first, then template, e.g.
+            <code>fr/Babywalzde/Ad4/…</code>
+          </div>
+        </div>
+
+        <div id="compressRow" class="size-form"
+          style="margin-bottom:6px;display:none">
+          <label
+            style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
+            <input type="checkbox" id="compressBelow150"
+              style="width:14px;height:14px" />
+            Compress images below 150kb
+          </label>
+          <div
+            style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
+            Re-encodes as JPEG, reducing quality until &lt; 150kb. Best for web
+            use.
+          </div>
+        </div>
+
+        <div class="export-info" id="exportInfo"
+          style="font-size:11px;color:var(--muted);min-height:16px;margin-bottom:4px"></div>
+
+        <!-- Export log -->
+        <div id="exportLog"
+          style="display:none;max-height:120px;overflow-y:auto;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:10px;color:var(--muted);font-family:monospace;margin-top:6px"></div>
+      </div>
+
+      <!-- Translate mode -->
+      <div id="modeTranslate" style="display:none">
+        <div style="display:flex;justify-content:flex-end;margin-bottom:8px">
+          <button type="button" id="resetTranslateBtn"
+            style="background:none;border:none;color:var(--muted);font-size:11px;cursor:pointer;padding:2px 0;text-decoration:underline">
+            ↺ Reset data
+          </button>
+        </div>
+        <div class="size-form" style="margin-bottom:10px">
+          <div class="dim-label" style="margin-bottom:6px">1. Upload translation
+            Excel file</div>
+          <label class="upload-btn" id="uploadLabel">
+            📂 Choose Excel file (.xlsx)
+            <input type="file" id="xlsxInput" accept=".xlsx"
+              style="display:none" />
+          </label>
+          <div class="upload-status" id="uploadStatus"></div>
+        </div>
+
+        <!-- Optional masterfile upload -->
+        <div class="size-form" style="margin-bottom:10px">
+          <div class="dim-label" style="margin-bottom:6px">2. (Optional) Upload
+            masterfile
+            <span style="color:var(--muted);font-weight:400"> — controls which
+              sizes per language</span></div>
+          <label class="upload-btn" id="masterfileLabel">
+            📂 Choose Masterfile Excel (.xlsx)
+            <input type="file" id="masterfileInput" accept=".xlsx"
+              style="display:none" />
+          </label>
+          <div class="upload-status" id="masterfileStatus"></div>
+        </div>
+
+        <div id="translateConfig" style="display:none">
+          <!-- Language selection -->
+          <div class="size-form" style="margin-bottom:10px">
+            <div class="dim-label" style="margin-bottom:6px">3. Select
+              languages</div>
+            <div class="lang-row">
+              <label class="lang-chip" id="langAll">
+                <input type="checkbox" id="checkAll" /> All
+              </label>
+            </div>
+            <div class="lang-list" id="langList"></div>
+            <div id="translateBannerCount"
+              style="font-size:11px;color:var(--muted);margin-top:6px"></div>
+          </div>
+
+          <!-- Text mapping -->
+          <div class="size-form" style="margin-bottom:10px">
+            <div class="dim-label" style="margin-bottom:6px">3. Map text layers
+              —
+              select a layer on canvas, then click a field to connect</div>
+            <div class="mapping-list" id="mappingList"></div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-primary" id="createBtn" disabled style="flex:1">
+          <span id="btnLabel">Create banner</span>
+        </button>
+        <button class="btn" id="pauseBtn"
+          style="display:none;background:var(--surface);color:var(--accent2);border:1px solid var(--accent);padding:0 14px;height:36px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600">
+          ⏸ Pause
+        </button>
+        <button class="btn" id="stopBtn"
+          style="display:none;background:var(--error,#e55);color:#fff;border:none;padding:0 14px;height:36px;border-radius:8px;cursor:pointer;font-size:12px;font-weight:600">
+          ⏹ Stop
+        </button>
+        <button class="btn btn-primary" id="continueBtn"
+          style="display:none;flex:1">
+          ▶ Continue
+        </button>
+      </div>
+      <div class="status" id="status"></div>
+      <div class="progress-bar-wrap" id="progressBarWrap">
+        <div class="progress-bar-fill" id="progressBarFill"></div>
+      </div>
+      <div class="progress-label" id="progressEl"></div>
+
+    </div><!-- /#appContent -->
 
     <script>
   var par = window.parent;
@@ -336,8 +495,177 @@
   var variants = [];
   var mode = 'single';
 
+  // ─── License gate ──────────────────────────────────────────────────────
+  // This is the only place in the plugin allowed to call fetch() — Figma's
+  // plugin sandbox (code.js) can't make network requests, only this UI iframe can.
+  //
+  // Storage: real persistence lives in figma.clientStorage, which only
+  // code.js can touch (some Figma UI iframe contexts block localStorage
+  // entirely). code.js reads it on startup and sends it here as a
+  // STORAGE_INIT message; we save back through SAVE_DEVICE_ID /
+  // SAVE_LICENSE_KEY messages rather than touching browser storage directly.
+  var LICENSE_ENDPOINT = 'https://magic-resizer-license.onrender.com/api/verify'; // TODO: replace with your deployed endpoint
+  var TRACK_ENDPOINT = LICENSE_ENDPOINT.replace('/api/verify', '/api/track');
+  var HEARTBEAT_INTERVAL_SECONDS = 30; // how often "time in app" is reported
+
+  var deviceId = null; // set once STORAGE_INIT arrives from code.js
+
+  var licenseOverlay = document.getElementById('licenseOverlay');
+  var appContent     = document.getElementById('appContent');
+  var licenseInput   = document.getElementById('licenseInput');
+  var licenseSubmit  = document.getElementById('licenseSubmit');
+  var licenseStatus  = document.getElementById('licenseStatus');
+
+  var activeLicenseKey = null;
+  var heartbeatTimer = null;
+
+  // Fire-and-forget usage event. Never blocks or errors the UI if it fails —
+  // usage tracking should never be able to break the actual plugin.
+  function trackEvent(type, extra) {
+    if (!activeLicenseKey || !deviceId) return;
+    var body = Object.assign({ key: activeLicenseKey, deviceId: deviceId, type: type }, extra || {});
+    fetch(TRACK_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).catch(function () { /* ignore — tracking is best-effort */ });
+  }
+
+  function startHeartbeat() {
+    if (heartbeatTimer) return; // already running
+    heartbeatTimer = setInterval(function () {
+      trackEvent('heartbeat', { seconds: HEARTBEAT_INTERVAL_SECONDS });
+    }, HEARTBEAT_INTERVAL_SECONDS * 1000);
+  }
+
+  // Re-validates the active key periodically while the plugin stays open, so an account
+  // revoked mid-session gets caught even if the user never re-submits a key or reopens the
+  // plugin. Without this, a license validated once at startup stayed "valid" in the
+  // backend's eyes for the rest of that session no matter what happened to the account
+  // afterward — the overlay is just a visual cue, the actual gate is the backend's
+  // licenseValid flag, and only reportLicenseStatus() keeps that in sync.
+  var RECHECK_INTERVAL_SECONDS = 120;
+  var recheckTimer = null;
+  function startLicenseRecheck() {
+    if (recheckTimer) return; // already running
+    recheckTimer = setInterval(function () {
+      if (!activeLicenseKey) return;
+      verifyLicense(activeLicenseKey).then(function (result) {
+        if (result.valid) {
+          // Push the freshly-issued token into code.js so its cached copy doesn't go
+          // stale once the previous token's exp passes — code.js only trusts a token
+          // it can verify itself, not a bare boolean, so this refresh is required for
+          // the session to keep working past the token's lifetime.
+          reportLicenseStatus(true, result.token);
+          return;
+        }
+        if (result.reason === 'network_error') return; // don't punish a transient connectivity blip
+        // Genuinely no longer valid (revoked, expired, moved to another device, etc.) —
+        // lock the UI back down AND make sure the backend actually knows, so hiding this
+        // overlay can never expose working functionality underneath again.
+        clearInterval(recheckTimer);
+        recheckTimer = null;
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+        activeLicenseKey = null;
+        reportLicenseStatus(false);
+        licenseOverlay.className = 'license-overlay';
+        setLicenseStatus('Your license is no longer active (' + (result.reason || 'revoked') + '). Enter a valid key to continue.', 'error');
+      });
+    }, RECHECK_INTERVAL_SECONDS * 1000);
+  }
+
+  function reportLicenseStatus(valid, token) {
+    if (appContent) {
+      if (valid) appContent.classList.remove('app-locked');
+      else appContent.classList.add('app-locked');
+    }
+    par.postMessage({ pluginMessage: { type: 'LICENSE_STATUS', valid: valid, token: token || null } }, '*');
+  }
+
+  function setLicenseStatus(text, cls) {
+    licenseStatus.textContent = text || '';
+    licenseStatus.className = 'license-status' + (cls ? ' ' + cls : '');
+  }
+
+  function verifyLicense(key) {
+    return fetch(LICENSE_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key, deviceId: deviceId })
+    }).then(function (r) { return r.json(); })
+      .catch(function () { return { valid: false, reason: 'network_error' }; });
+  }
+
+  function unlockUI(key, token) {
+    licenseOverlay.className = 'license-overlay hidden';
+    activeLicenseKey = key;
+    par.postMessage({ pluginMessage: { type: 'SAVE_LICENSE_KEY', key: key } }, '*');
+    startHeartbeat();
+    startLicenseRecheck();
+    reportLicenseStatus(true, token);
+  }
+
+  function tryStoredKey(savedKey) {
+    setLicenseStatus('Checking license…', 'checking');
+    verifyLicense(savedKey).then(function (result) {
+      if (result.valid) {
+        unlockUI(savedKey, result.token);
+      } else if (result.reason === 'device_limit_reached') {
+        setLicenseStatus('This license is now active on a different machine. Contact Trung for your own license key.', 'error');
+        reportLicenseStatus(false);
+      } else {
+        par.postMessage({ pluginMessage: { type: 'CLEAR_LICENSE_KEY' } }, '*');
+        setLicenseStatus('Saved key is no longer valid (' + (result.reason || 'invalid') + '). Enter a new one.', 'error');
+        reportLicenseStatus(false);
+      }
+    });
+  }
+
+  licenseSubmit.addEventListener('click', function () {
+    var key = licenseInput.value.trim();
+    if (!key) { setLicenseStatus('Enter a license key.', 'error'); return; }
+    if (!deviceId) { setLicenseStatus('Still starting up — try again in a second.', 'error'); return; }
+    setLicenseStatus('Checking…', 'checking');
+    licenseSubmit.disabled = true;
+    verifyLicense(key).then(function (result) {
+      licenseSubmit.disabled = false;
+      if (result.valid) {
+        unlockUI(key, result.token);
+      } else if (result.reason === 'device_limit_reached') {
+        setLicenseStatus('This license is already active on another machine. Contact Trung for your own license key.', 'error');
+        reportLicenseStatus(false);
+      } else {
+        setLicenseStatus('Invalid key (' + (result.reason || 'invalid') + ').', 'error');
+        reportLicenseStatus(false);
+      }
+    });
+  });
+
+  // code.js sends this once, right after it reads figma.clientStorage on
+  // startup. Everything license-related waits for it instead of touching
+  // localStorage directly.
+  window.addEventListener('message', function (event) {
+    var msg = event.data && event.data.pluginMessage;
+    if (!msg || msg.type !== 'STORAGE_INIT') return;
+
+    if (msg.deviceId) {
+      deviceId = msg.deviceId;
+    } else {
+      deviceId = 'dev-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+      par.postMessage({ pluginMessage: { type: 'SAVE_DEVICE_ID', deviceId: deviceId } }, '*');
+    }
+
+    if (msg.licenseKey) {
+      tryStoredKey(msg.licenseKey);
+    } else {
+      reportLicenseStatus(false);
+    }
+  });
+  // ─── End license gate ──────────────────────────────────────────────────
+
   // Translate state
   var translationData = null;   // { languages: ['EN','DE',...], columns: [...], rows: {EN:{col:val,...},...} }
+  var stopFlag = false; // set to true when user clicks Stop
   var masterfileData = null;    // { langMap: { 'DE': [{w,h},...], 'FR': [{w,h},...] } } or null if not uploaded
   var mappings = {};            // { columnName: { layerId, layerName } }
   var selectingField = null;    // column name being mapped
@@ -359,6 +687,54 @@
   var batchCount   = document.getElementById('batchCount');
   var createBtn    = document.getElementById('createBtn');
   var btnLabel     = document.getElementById('btnLabel');
+  var stopBtn      = document.getElementById('stopBtn');
+  var pauseBtn     = document.getElementById('pauseBtn');
+  var continueBtn  = document.getElementById('continueBtn');
+
+  stopBtn.addEventListener('click', function() {
+    stopFlag = true;
+    stopBtn.textContent = '⏹ Stopping…';
+    stopBtn.disabled = true;
+    pauseBtn.disabled = true;
+    par.postMessage({ pluginMessage: { type: 'STOP_PROCESS' } }, '*');
+  });
+
+  pauseBtn.addEventListener('click', function() {
+    pauseBtn.textContent = '⏸ Pausing…';
+    pauseBtn.disabled = true;
+    stopBtn.disabled = true;
+    par.postMessage({ pluginMessage: { type: 'PAUSE_PROCESS' } }, '*');
+  });
+
+  continueBtn.addEventListener('click', function() {
+    hideContinueBtn();
+    var resumeType = (mode === 'export') ? 'CONTINUE_EXPORT' : (mode === 'translate') ? 'CONTINUE_TRANSLATE' : 'CONTINUE_BATCH';
+    par.postMessage({ pluginMessage: { type: resumeType } }, '*');
+  });
+
+  // Stop always appears while a process is running. Pause applies to batch, export, and
+  // translate — each has its own resumable checkpoint (per-banner, per-frame, per-language).
+  function showStopBtn() {
+    stopBtn.style.display = ''; stopBtn.textContent = '⏹ Stop'; stopBtn.disabled = false; stopFlag = false;
+    if (mode === 'batch' || mode === 'export' || mode === 'translate') {
+      pauseBtn.style.display = ''; pauseBtn.textContent = '⏸ Pause'; pauseBtn.disabled = false;
+    } else {
+      pauseBtn.style.display = 'none';
+    }
+  }
+  function hideStopBtn() {
+    stopBtn.style.display = 'none'; stopFlag = false;
+    pauseBtn.style.display = 'none';
+  }
+  function showContinueBtn() { continueBtn.style.display = ''; }
+  function hideContinueBtn() { continueBtn.style.display = 'none'; }
+
+  // True while a batch/export/translate is actively running OR paused (Continue showing).
+  // Switching tabs in either state would silently abandon or corrupt that process's
+  // state on the plugin side, so tab switches are blocked until it's stopped or finishes.
+  function isProcessRunning() {
+    return stopBtn.style.display !== 'none' || continueBtn.style.display !== 'none';
+  }
   var statusEl     = document.getElementById('status');
   var progressEl   = document.getElementById('progressEl');
   var progressBarWrap = document.getElementById('progressBarWrap');
@@ -387,6 +763,13 @@
   var templateSelect   = document.getElementById('templateSelect');
   var refreshTemplates = document.getElementById('refreshTemplates');
   var templateRow      = document.getElementById('templateRow');
+  var hasTemplates      = false; // set once TEMPLATES_LIST arrives
+
+  // Template selection only applies to Single/Batch (resize) workflows — Translate and
+  // Export don't use it, so keep the row hidden there even when templates exist.
+  function updateTemplateRowVisibility() {
+    templateRow.style.display = (hasTemplates && (mode === 'single' || mode === 'batch')) ? 'flex' : 'none';
+  }
 
   // Load templates on open
   par.postMessage({ pluginMessage: { type: 'GET_TEMPLATES' } }, '*');
@@ -415,16 +798,20 @@
 
   // ── Tabs ──
   tabSingle.addEventListener('click', function() {
+    if (isProcessRunning()) return;
     mode = 'single';
     tabSingle.className = 'tab active'; tabBatch.className = 'tab'; tabTranslate.className = 'tab'; tabExport.className = 'tab';
     modeSingle.style.display = 'block'; modeBatch.style.display = 'none'; modeTranslate.style.display = 'none'; modeExport.style.display = 'none';
-    createBtn.style.display = 'block'; updateBtn();
+    createBtn.style.display = 'block'; btnLabel.textContent = 'Create banner'; updateBtn();
+    updateTemplateRowVisibility();
   });
   tabBatch.addEventListener('click', function() {
+    if (isProcessRunning()) return;
     mode = 'batch';
     tabBatch.className = 'tab active'; tabSingle.className = 'tab'; tabTranslate.className = 'tab'; tabExport.className = 'tab';
     modeBatch.style.display = 'block'; modeSingle.style.display = 'none'; modeTranslate.style.display = 'none'; modeExport.style.display = 'none';
-    createBtn.style.display = 'block'; parseBatch(); updateBtn();
+    createBtn.style.display = 'block'; btnLabel.textContent = 'Create banners'; parseBatch(); updateBtn();
+    updateTemplateRowVisibility();
   });
   var tabExport    = document.getElementById('tabExport');
   var modeExport   = document.getElementById('modeExport');
@@ -443,6 +830,7 @@
   }
 
   tabExport.addEventListener('click', function() {
+    if (isProcessRunning()) return;
     mode = 'export';
     tabExport.className = 'tab active';
     tabSingle.className = 'tab'; tabBatch.className = 'tab'; tabTranslate.className = 'tab';
@@ -451,6 +839,7 @@
     createBtn.style.display = 'block';
     btnLabel.textContent = 'Export';
     createBtn.disabled = false;
+    updateTemplateRowVisibility();
     exportLog.innerHTML = ''; exportLog.style.display = 'none';
     updateExportInfo();
     // Request page list from plugin
@@ -486,6 +875,22 @@
     exportLangSection.style.display = 'none';
     updateExportInfo();
   });
+
+  // "Group by template" and "Group by retailer" control two different, mutually exclusive
+  // folder nesting orders (template/retailer vs retailer/template) — checking one always
+  // unchecks the other, since combining them isn't a supported structure.
+  (function () {
+    var groupByTemplateChk = document.getElementById('groupByTemplate');
+    var groupByRetailerChk = document.getElementById('groupByRetailer');
+    if (groupByTemplateChk && groupByRetailerChk) {
+      groupByTemplateChk.addEventListener('change', function () {
+        if (groupByTemplateChk.checked) groupByRetailerChk.checked = false;
+      });
+      groupByRetailerChk.addEventListener('change', function () {
+        if (groupByRetailerChk.checked) groupByTemplateChk.checked = false;
+      });
+    }
+  })();
   document.getElementById('exportAll').addEventListener('change', function() {
     exportLangSection.style.display = 'block';
     updateExportInfo();
@@ -521,6 +926,7 @@
   var mappingList = document.getElementById('mappingList');
 
   tabTranslate.addEventListener('click', function() {
+    if (isProcessRunning()) return;
     mode = 'translate';
     tabTranslate.className = 'tab active';
     tabSingle.className = 'tab'; tabBatch.className = 'tab'; tabExport.className = 'tab';
@@ -529,6 +935,7 @@
     createBtn.style.display = 'block';
     btnLabel.textContent = 'Translate banners';
     createBtn.disabled = !canTranslate();
+    updateTemplateRowVisibility();
   });
 
   // ── Excel upload ──
@@ -575,11 +982,15 @@
     var widthCol = -1, heightCol = -1, accountCol = -1;
 
     // Full language name → 2-letter code
+    // NOTE: codes must match what the translation Excel/UI checkboxes use, which are
+    // country codes (FR, DE, NL, ES, IT, NO, SE, PT, DK...), not ISO language codes —
+    // e.g. Danish is "DK" here, not the language code "DA", or masterfile rows for
+    // Danish silently never match any selected language.
     var langNameMap = {
-      'DANISH':'DA','NORVEGIAN':'NO','NORWEGIAN':'NO','SWEDISH':'SE','FINNISH':'FI',
+      'DANISH':'DK','NORVEGIAN':'NO','NORWEGIAN':'NO','SWEDISH':'SE','FINNISH':'FI',
       'DUTCH':'NL','GERMAN':'DE','ITALIAN':'IT','PORTUGUESE':'PT',
-      'FRENCH':'FR','ENGLISH':'EN','SPANISH':'ES','GREEK':'EL',
-      'POLISH':'PL','CZECH':'CS','HUNGARIAN':'HU','ROMANIAN':'RO'
+      'FRENCH':'FR','ENGLISH':'EN','SPANISH':'ES','GREEK':'GR',
+      'POLISH':'PL','CZECH':'CZ','HUNGARIAN':'HU','ROMANIAN':'RO'
     };
 
     for (var c = 0; c < hdr.length; c++) {
@@ -631,7 +1042,90 @@
     masterfileStatus.textContent = '✓ ' + langs.length + ' languages, ' + total + ' size+retailer rules loaded';
     masterfileStatus.style.color = 'var(--success)';
     console.log('[masterfile] done: ' + langs.join(', ') + ', total=' + total);
+    // Refresh the per-language banner count immediately — previously this only updated
+    // on a checkbox click, so uploading a masterfile after languages were already
+    // selected left the (now stale) counts showing until the user happened to click one.
+    updateTranslateBannerCount();
   }
+
+  function resetTranslateState() {
+    translationData = null;
+    masterfileData = null;
+    mappings = {};
+    selectingField = null;
+    currentLayerId = null;
+    currentLayerName = null;
+
+    xlsxInput.value = '';
+    masterfileInput.value = '';
+    uploadStatus.textContent = '';
+    masterfileStatus.textContent = '';
+    langList.innerHTML = '';
+    mappingList.innerHTML = '';
+    translateConfig.style.display = 'none';
+    checkAll.checked = false;
+    var countEl = document.getElementById('translateBannerCount');
+    if (countEl) countEl.innerHTML = '';
+  }
+
+  document.getElementById('resetTranslateBtn').addEventListener('click', function() {
+    if (translationData || masterfileData) {
+      var ok = window.confirm('Reset all translation data? This clears the uploaded files, language selection, and field mappings.');
+      if (!ok) return;
+    }
+    resetTranslateState();
+    createBtn.disabled = true;
+    btnLabel.textContent = 'Translate banners';
+    statusEl.className = 'status';
+  });
+
+  document.getElementById('resetAppBtn').addEventListener('click', function() {
+    // Same guard as switching tabs — resetting mid-run would abandon or corrupt
+    // whatever's currently in flight on the plugin side.
+    if (isProcessRunning()) return;
+    var ok = window.confirm('Reset the entire app? This clears all inputs, uploaded files, and selections across every tab.');
+    if (!ok) return;
+
+    // Single tab
+    widthInput.value = '';
+    heightInput.value = '';
+    labelInput.value = '';
+    ratioHint.textContent = '';
+
+    // Batch tab
+    batchInput.value = '';
+
+    // Export tab
+    document.getElementById('exportSelected').checked = true;
+    document.getElementById('exportAll').checked = false;
+    exportLangSection.style.display = 'none';
+    exportLangList.innerHTML = '';
+    exportCheckAll.checked = true;
+    exportLog.innerHTML = '';
+    exportLog.style.display = 'none';
+    var exportScaleEl = document.getElementById('exportScale');
+    if (exportScaleEl) exportScaleEl.selectedIndex = 0;
+    var groupByTemplateEl = document.getElementById('groupByTemplate');
+    if (groupByTemplateEl) groupByTemplateEl.checked = false;
+    var groupByRetailerEl = document.getElementById('groupByRetailer');
+    if (groupByRetailerEl) groupByRetailerEl.checked = false;
+
+    // Translate tab — same reset used by its own dedicated button
+    resetTranslateState();
+
+    // Template selection
+    templateSelect.innerHTML = '<option value="">— Select a template —</option>';
+    variantsWrap.style.display = 'none';
+    variantsList.innerHTML = '';
+
+    // Status/progress, shared across all tabs
+    setProgress(0, 0, '');
+    statusEl.className = 'status';
+    statusEl.innerHTML = '';
+
+    // Back to the default tab
+    tabSingle.click();
+  });
 
   xlsxInput.addEventListener('change', function() {
     var file = xlsxInput.files[0];
@@ -672,6 +1166,15 @@
     var langCodeRegex = /^[A-Z]{2}$/;
     var headers = rows[0].map(function(h) { return h ? String(h).trim() : ''; });
 
+    // Normalize a translation cell's text: Excel line breaks (Enter/Alt+Enter within a
+    // cell) can come through as "\r\n" or "\r" depending on the file — collapse those to
+    // a plain "\n" so Figma renders them as an actual line break. Trim() only removes
+    // leading/trailing whitespace (including blank lines), it never touches internal
+    // line breaks, so multi-line cell content is preserved.
+    function normalizeCellText(v) {
+      return String(v == null ? '' : v).replace(/\r\n?/g, '\n').trim();
+    }
+
     // Auto-detect format:
     // Format A (old): col[0] = empty/label, col[1+] = column names, rows have lang code in col[0]
     //   Header: ["", "Field1", "Field2", ...]
@@ -711,7 +1214,7 @@
       for (var r = 1; r < rows.length; r++) {
         var row = rows[r];
         if (!row || !row[enColIdx]) continue;
-        var enText = String(row[enColIdx]).trim();
+        var enText = normalizeCellText(row[enColIdx]);
         if (!enText) continue;
         columns.push(enText); // EN text is both the column name and the key
         enData[enText] = enText;
@@ -721,7 +1224,7 @@
           for (var h = 0; h < langCodes.length; h++) {
             if (langCodes[h].lang === lang) { colIdx = langCodes[h].col; break; }
           }
-          var translated = (colIdx !== null && row[colIdx]) ? String(row[colIdx]).trim() : enText;
+          var translated = (colIdx !== null && row[colIdx]) ? normalizeCellText(row[colIdx]) : enText;
           langData[lang][enText] = translated;
         }
       }
@@ -736,7 +1239,7 @@
       }
       var enRow = rows[1] || [];
       for (var c = 0; c < columns.length; c++) {
-        enData[columns[c]] = enRow[c + 1] !== undefined ? String(enRow[c + 1]).trim() : '';
+        enData[columns[c]] = enRow[c + 1] !== undefined ? normalizeCellText(enRow[c + 1]) : '';
       }
       for (var r = 1; r < rows.length; r++) {
         var row = rows[r];
@@ -747,7 +1250,7 @@
         languages.push(lang);
         langData[lang] = {};
         for (var c = 0; c < columns.length; c++) {
-          langData[lang][columns[c]] = row[c + 1] !== undefined ? String(row[c + 1]).trim() : '';
+          langData[lang][columns[c]] = row[c + 1] !== undefined ? normalizeCellText(row[c + 1]) : '';
         }
       }
     }
@@ -776,6 +1279,7 @@
       langList.appendChild(lbl);
     });
     checkAll.checked = true;
+    updateTranslateBannerCount();
   }
 
   checkAll.addEventListener('change', function() {
@@ -851,9 +1355,6 @@
           break;
         }
       }
-
-      // Only show fields that auto-matched OR show all if no matches at all
-      if (!matchedLayer && anyMatch) return;
       if (matchedLayer) anyMatch = true;
 
       var row = document.createElement('div');
@@ -885,34 +1386,13 @@
       mappingList.appendChild(row);
     });
 
-    // If nothing matched at all, show all fields for manual mapping
+    // If nothing matched at all, prepend a note — the fields themselves are already
+    // rendered above (each with its own "select layer on canvas" button either way)
     if (!anyMatch) {
-      mappingList.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:4px 0">No auto-matches found. Select each layer manually.</div>';
-      console.log("Layers:", textLayers.map(function(l){return JSON.stringify(l.text.substring(0,30));}));
-    console.log("EN:", JSON.stringify(enRow));
-    translationData.columns.forEach(function(col) {
-        var enText = enRow[col];
-        if (!enText || !enText.trim()) return;
-        var row = document.createElement('div');
-        row.className = 'map-row';
-        row.innerHTML = '<div class="map-field" title="' + enText + '">' + enText + '</div>' +
-          '<button class="map-btn" data-col="' + col + '">← select layer on canvas</button>';
-        var btn = row.querySelector('.map-btn');
-        btn.addEventListener('click', function() {
-          if (selectingField === col) {
-            selectingField = null;
-            btn.className = 'map-btn' + (mappings[col] ? ' mapped' : '');
-            btn.textContent = mappings[col] ? '✓ ' + mappings[col].name : '← select layer on canvas';
-          } else {
-            clearSelecting();
-            selectingField = col;
-            btn.className = 'map-btn selecting';
-            btn.textContent = '⏳ select text layer…';
-            par.postMessage({ pluginMessage: { type: 'GET_SELECTED_TEXT_LAYER' } }, '*');
-          }
-        });
-        mappingList.appendChild(row);
-      });
+      var noMatchNote = document.createElement('div');
+      noMatchNote.style.cssText = 'font-size:11px;color:var(--muted);padding:4px 0';
+      noMatchNote.textContent = 'No auto-matches found. Select each layer manually.';
+      mappingList.insertBefore(noMatchNote, mappingList.firstChild);
     }
 
     createBtn.disabled = !canTranslate();
@@ -979,11 +1459,14 @@
       }
     }
     if (msg.type === 'EXPORT_PROGRESS') {
+      showStopBtn();
       showStatus('loading', '<span class="spinner"></span> ' + msg.message);
       setProgress(msg.done || 0, msg.total || 0, msg.detail || '');
       if (msg.detail) addExportLog(msg.detail);
     }
     if (msg.type === 'EXPORT_ERROR') {
+      hideStopBtn();
+      hideContinueBtn();
       btnLabel.textContent = 'Export';
       createBtn.disabled = false;
       setProgress(0, 0, '');
@@ -1009,7 +1492,44 @@
       showStatus('loading', '<span class="spinner"></span> ' + msg.message);
       setProgress(msg.done || 0, msg.total || 0, msg.detail || '');
     }
+    if (msg.type === 'TRANSLATE_PAUSED') {
+      hideStopBtn();
+      showContinueBtn();
+      btnLabel.textContent = 'Translate banners';
+      setProgress(msg.done, msg.total, '');
+      showStatus('loading', msg.message || ('Paused — ' + msg.done + '/' + msg.total + ' languages complete.'));
+    }
+    if (msg.type === 'TRANSLATE_COLLISION') {
+      var modal = document.getElementById('translateCollisionModal');
+      var nameEl = document.getElementById('collisionFrameName');
+      var langEl = document.getElementById('collisionLang');
+      var applyAllEl = document.getElementById('collisionApplyAll');
+      var overrideBtn = document.getElementById('collisionOverrideBtn');
+      var keepBtn = document.getElementById('collisionKeepBtn');
+      nameEl.textContent = msg.frameName;
+      langEl.textContent = msg.lang;
+      applyAllEl.checked = false;
+      modal.classList.remove('hidden');
+      function cleanupCollisionModal() {
+        modal.classList.add('hidden');
+        overrideBtn.removeEventListener('click', onOverride);
+        keepBtn.removeEventListener('click', onKeep);
+      }
+      function onOverride() {
+        var choice = applyAllEl.checked ? 'override-all' : 'override';
+        cleanupCollisionModal();
+        par.postMessage({ pluginMessage: { type: 'TRANSLATE_COLLISION_RESOLVED', choice: choice } }, '*');
+      }
+      function onKeep() {
+        var choice = applyAllEl.checked ? 'keep-both-all' : 'keep-both';
+        cleanupCollisionModal();
+        par.postMessage({ pluginMessage: { type: 'TRANSLATE_COLLISION_RESOLVED', choice: choice } }, '*');
+      }
+      overrideBtn.addEventListener('click', onOverride);
+      keepBtn.addEventListener('click', onKeep);
+    }
     if (msg.type === 'TRANSLATE_DONE') {
+      hideStopBtn();
       btnLabel.textContent = 'Translate banners';
       createBtn.disabled = !canTranslate();
       setProgress(0, 0, '');
@@ -1076,6 +1596,15 @@
   }
 
   batchInput.addEventListener('input', function() { parseBatch(); updateBtn(); });
+
+  // Vertical layout stacks every banner into a single column below the master,
+  // so the row-width control ("Banners per row") doesn't apply — grey it out.
+  var verticalLayoutCheckbox = document.getElementById('verticalLayout');
+  var bannersPerRowInput = document.getElementById('bannersPerRow');
+  verticalLayoutCheckbox.addEventListener('change', function() {
+    bannersPerRowInput.disabled = verticalLayoutCheckbox.checked;
+    bannersPerRowInput.style.opacity = verticalLayoutCheckbox.checked ? '0.4' : '1';
+  });
 
   // ── Ratio hint (single mode) ──
   function gcd(a, b) { a = Math.round(a); b = Math.round(b); return b === 0 ? a : gcd(b, a % b); }
@@ -1162,26 +1691,37 @@
       var sizes = parseBatch();
       if (!sizes.length) return;
       var perRow = parseInt(document.getElementById('bannersPerRow').value, 10) || 5;
-      par.postMessage({ pluginMessage: { type: 'BATCH_RESIZE', sizes: sizes, maxPerRow: perRow } }, '*');
+      var retailerBreak = document.getElementById('retailerBreakLine').checked;
+      var verticalLayout = document.getElementById('verticalLayout').checked;
+      par.postMessage({ pluginMessage: { type: 'BATCH_RESIZE', sizes: sizes, maxPerRow: perRow, retailerBreak: retailerBreak, verticalLayout: verticalLayout } }, '*');
     } else if (mode === 'export') {
       var scope  = document.querySelector('input[name=exportScope]:checked').value;
       var format = document.querySelector('input[name=exportFormat]:checked').value;
       var scale  = parseFloat(document.getElementById('exportScale').value);
+      var groupByTemplateChk = document.getElementById('groupByTemplate');
+      var groupByRetailerChk = document.getElementById('groupByRetailer');
+      var groupByTemplate = !!(groupByTemplateChk && groupByTemplateChk.checked);
+      var groupByRetailer = !!(groupByRetailerChk && groupByRetailerChk.checked);
       var exportLangs = scope === 'all' ? getSelectedExportLangs() : [];
       exportLog.innerHTML = ''; exportLog.style.display = 'block';
       window._exportZip = new JSZip();
       window._pdfFrames = [];
-      window._pendingCompress = 0;
+      window._pendingFileQueue = 0;
+      window._fileQueue = [];
+      window._fileQueueBusy = false;
+      window._exportUsedPaths = {};
       window._exportDoneMsg = null;
-      addExportLog('Starting export — scope=' + scope + ' format=' + format + ' scale=' + scale + (exportLangs.length ? ' langs=' + exportLangs.join(',') : ''));
-      btnLabel.innerHTML = '<span class="spinner"></span> Exporting…';
+      addExportLog('Starting export — scope=' + scope + ' format=' + format + ' scale=' + scale + (groupByTemplate ? ' groupByTemplate=true' : '') + (groupByRetailer ? ' groupByRetailer=true' : '') + (exportLangs.length ? ' langs=' + exportLangs.join(',') : ''));
+      btnLabel.textContent = 'Exporting…';
       createBtn.disabled = true;
-      par.postMessage({ pluginMessage: { type: 'EXPORT_BANNERS', scope: scope, format: format, scale: scale, languages: exportLangs } }, '*');
+      showStopBtn();
+      par.postMessage({ pluginMessage: { type: 'EXPORT_BANNERS', scope: scope, format: format, scale: scale, languages: exportLangs, groupByTemplate: groupByTemplate, groupByRetailer: groupByRetailer } }, '*');
     } else if (mode === 'translate') {
       var langs = getSelectedLanguages();
       if (!langs.length || !translationData) return;
-      btnLabel.innerHTML = '<span class="spinner"></span> Translating…';
+      btnLabel.textContent = 'Translating…';
       createBtn.disabled = true;
+      showStopBtn();
       setProgress(0, langs.length, '0/' + langs.length + ' languages');
       showStatus('loading', '<span class="spinner"></span> Starting translation…');
       par.postMessage({ pluginMessage: {
@@ -1215,41 +1755,23 @@
             y: msg.y
         });
       } else {
-        if (!window._exportZip) window._exportZip = new JSZip();
         var compressChk = document.getElementById('compressBelow150');
         var shouldCompress = compressChk && compressChk.checked;
         // Correct extension to match selected format
         var _base = msg.name.replace(/\.(png|jpg|jpeg)$/i, '');
-        var _fixedName = _base + (msg.format === 'JPG' ? '.jpg' : '.png');
-        if (shouldCompress) {
-          window._pendingCompress = (window._pendingCompress || 0) + 1;
-          var _mb = msg.bytes, _mf = msg.folder, _bn = _base, _fmt = msg.format;
-          compressToTarget(_mb, 150, _fmt, function(compressed, ext) {
-            var fname = _bn + '.' + ext;
-            var path = _mf ? _mf + '/' + fname : fname;
-            var kb = Math.round(compressed.byteLength / 1024);
-            addExportLog('  ' + fname + ' → ' + kb + 'kb');
-            if (!window._exportZip) window._exportZip = new JSZip();
-            window._exportZip.file(path, new Uint8Array(compressed));
-            window._pendingCompress = Math.max(0, (window._pendingCompress || 1) - 1);
-            if (window._pendingCompress === 0 && window._exportDoneMsg) {
-              finalizeZipExport(window._exportDoneMsg);
-              window._exportDoneMsg = null;
-            }
-          });
-        } else {
-          var path = _mf ? _mf + '/' + _fixedName : _fixedName;
-          window._exportZip.file(path, new Uint8Array(msg.bytes));
-        }
+        enqueueZipFile({ bytes: msg.bytes, format: msg.format, baseName: _base, folder: msg.folder, shouldCompress: shouldCompress });
       }
     }
 
     if (msg.type === 'EXPORT_DONE') {
+      trackEvent('export', { count: msg.assetsExported || 1 });
       var isPDF = msg.format === 'PDF';
       if (isPDF && window._pdfFrames && window._pdfFrames.length > 0) {
         addExportLog('📄 Generating PDF (' + window._pdfFrames.length + ' banners)…');
         buildPDF(window._pdfFrames).then(function() {
           window._pdfFrames = null;
+          hideStopBtn();
+          hideContinueBtn();
           btnLabel.textContent = 'Export';
           createBtn.disabled = false;
           setProgress(0, 0, '');
@@ -1257,13 +1779,15 @@
           addExportLog('✓ ' + msg.message);
         });
       } else if (window._exportZip) {
-        if ((window._pendingCompress || 0) > 0) {
+        if ((window._pendingFileQueue || 0) > 0) {
           window._exportDoneMsg = msg;
-          addExportLog('Waiting for ' + window._pendingCompress + ' compression(s)...');
+          addExportLog('Waiting for ' + window._pendingFileQueue + ' file(s) to finish...');
         } else {
           finalizeZipExport(msg);
         }
       } else {
+        hideStopBtn();
+        hideContinueBtn();
         btnLabel.textContent = 'Export';
         createBtn.disabled = false;
         setProgress(0, 0, '');
@@ -1273,9 +1797,10 @@
     }
 
     if (msg.type === 'TEXT_LAYER_SELECTED' || msg.type === 'NO_TEXT_LAYER' ||
-        msg.type === 'TRANSLATE_PROGRESS' || msg.type === 'TRANSLATE_DONE' ||
+        msg.type === 'TRANSLATE_PROGRESS' || msg.type === 'TRANSLATE_DONE' || msg.type === 'TRANSLATE_PAUSED' ||
+        msg.type === 'TRANSLATE_COLLISION' ||
         msg.type === 'TEXT_LAYERS' || msg.type === 'EXPORT_PROGRESS' ||
-        msg.type === 'PAGES_LIST') {
+        msg.type === 'EXPORT_ERROR' || msg.type === 'FRAME_COUNT' || msg.type === 'PAGES_LIST') {
       handleTranslateMessages(msg); return;
     }
 
@@ -1289,8 +1814,9 @@
         opt.textContent = extractSizeLabel(t.name);
         templateSelect.appendChild(opt);
       }
-      // Only show template row if there are templates
-      templateRow.style.display = msg.templates.length > 0 ? 'flex' : 'none';
+      // Only show template row if there are templates AND we're on a tab that uses it
+      hasTemplates = msg.templates.length > 0;
+      updateTemplateRowVisibility();
     }
 
     if (msg.type === 'MASTER_INFO') {
@@ -1337,22 +1863,51 @@
     }
 
     if (msg.type === 'LOADING') {
-      btnLabel.innerHTML = '<span class="spinner"></span> Creating…';
+      btnLabel.textContent = 'Creating…';
       createBtn.disabled = true;
+      hideContinueBtn();
+      showStopBtn();
       setProgress(0, 0, '');
-      showStatus('loading', msg.message || 'Creating banner…');
+      showStatus('loading', '<span class="spinner"></span> ' + (msg.message || 'Creating banner…'));
     }
     if (msg.type === 'PROGRESS') {
       setProgress(msg.done, msg.total, msg.message);
       showStatus('loading', '<span class="spinner"></span> Creating banners…');
     }
-    if (msg.type === 'SUCCESS') {
+    if (msg.type === 'SUCCESS' || msg.type === 'DONE') {
+      hideStopBtn();
+      hideContinueBtn();
       btnLabel.textContent = mode === 'batch' ? 'Create banners' : 'Create banner';
       setProgress(0, 0, '');
       showStatus('success', msg.message);
       updateBtn();
     }
+    if (msg.type === 'STOPPED') {
+      showStatus('loading', '<span class="spinner"></span> ' + (msg.message || 'Stopping…'));
+      var openCollisionModal = document.getElementById('translateCollisionModal');
+      if (openCollisionModal) openCollisionModal.classList.add('hidden');
+    }
+    if (msg.type === 'PAUSING') {
+      showStatus('loading', '<span class="spinner"></span> ' + (msg.message || 'Pausing…'));
+    }
+    if (msg.type === 'PAUSED') {
+      hideStopBtn();
+      showContinueBtn();
+      btnLabel.textContent = mode === 'batch' ? 'Create banners' : 'Create banner';
+      setProgress(msg.done, msg.total, '');
+      showStatus('loading', msg.message || ('Paused — ' + msg.done + '/' + msg.total + ' banners created.'));
+    }
+    if (msg.type === 'EXPORT_PAUSED') {
+      hideStopBtn();
+      showContinueBtn();
+      btnLabel.textContent = 'Export';
+      setProgress(msg.done, msg.total, '');
+      showStatus('loading', msg.message || ('Paused — ' + msg.done + '/' + msg.total + ' frames exported.'));
+      addExportLog('⏸ ' + (msg.message || 'Paused'));
+    }
     if (msg.type === 'ERROR') {
+      hideStopBtn();
+      hideContinueBtn();
       btnLabel.textContent = mode === 'batch' ? 'Create banners' : 'Create banner';
       setProgress(0, 0, '');
       showStatus('error', msg.message);
@@ -1368,15 +1923,106 @@
       a.href = url; a.download = 'banners_export.zip';
       document.body.appendChild(a); a.click();
       document.body.removeChild(a); URL.revokeObjectURL(url);
-      window._exportZip = null; window._pendingCompress = 0;
+      window._exportZip = null; window._pendingFileQueue = 0;
       addExportLog('✓ Downloaded banners_export.zip');
     });
+    hideStopBtn();
+    hideContinueBtn();
     btnLabel.textContent = 'Export'; createBtn.disabled = false;
     setProgress(0, 0, ''); showStatus('success', doneMsg.message);
     addExportLog('✓ ' + doneMsg.message);
   }
 
   function showStatus(type, text) { statusEl.className = 'status ' + type; statusEl.innerHTML = text; }
+
+  // ── EXPORT FILE QUEUE ────────────────────────────────────────────────────
+  // Every exported file (compressed or not) flows through this single serialized
+  // queue, so duplicate-name checks and prompts never race against each other —
+  // only one file is ever being resolved/added to the zip at a time.
+  function enqueueZipFile(task) {
+    window._pendingFileQueue = (window._pendingFileQueue || 0) + 1;
+    if (!window._fileQueue) window._fileQueue = [];
+    window._fileQueue.push(task);
+    if (!window._fileQueueBusy) processFileQueue();
+  }
+
+  async function processFileQueue() {
+    window._fileQueueBusy = true;
+    while (window._fileQueue && window._fileQueue.length > 0) {
+      var task = window._fileQueue.shift();
+      try { await handleFileTask(task); } catch (e) { addExportLog('✗ ' + task.baseName + ': ' + e.message); }
+      window._pendingFileQueue = Math.max(0, (window._pendingFileQueue || 1) - 1);
+      if (window._pendingFileQueue === 0 && window._exportDoneMsg) {
+        finalizeZipExport(window._exportDoneMsg);
+        window._exportDoneMsg = null;
+      }
+    }
+    window._fileQueueBusy = false;
+  }
+
+  async function handleFileTask(task) {
+    var finalBytes, ext;
+    if (task.shouldCompress) {
+      var result = await compressToTargetAsync(task.bytes, 150, task.format);
+      finalBytes = result.bytes; ext = result.ext;
+      addExportLog('  ' + task.baseName + '.' + ext + ' → ' + Math.round(finalBytes.byteLength / 1024) + 'kb');
+    } else {
+      finalBytes = task.bytes;
+      ext = (task.format === 'JPG') ? 'jpg' : 'png';
+    }
+    var path = await resolveUniquePath(task.folder, task.baseName, ext);
+    if (!window._exportZip) window._exportZip = new JSZip();
+    window._exportZip.file(path, new Uint8Array(finalBytes));
+    if (!window._exportUsedPaths) window._exportUsedPaths = {};
+    window._exportUsedPaths[path] = true;
+  }
+
+  function compressToTargetAsync(bytes, targetKB, format) {
+    return new Promise(function(resolve) {
+      compressToTarget(bytes, targetKB, format, function(compressed, ext) {
+        resolve({ bytes: compressed, ext: ext });
+      });
+    });
+  }
+
+  // If the computed path already exists in this export, ask the user whether to
+  // replace it or keep both (appending -1, -2, -3... to the new one).
+  async function resolveUniquePath(folder, baseName, ext) {
+    if (!window._exportUsedPaths) window._exportUsedPaths = {};
+    var path = folder ? folder + '/' + baseName + '.' + ext : baseName + '.' + ext;
+    if (!window._exportUsedPaths[path]) return path;
+
+    var choice = await askDuplicateChoice(path);
+    if (choice === 'replace') return path;
+
+    // Keep both — find the next available "-N" suffix
+    var n = 1, candidate;
+    do {
+      candidate = folder ? folder + '/' + baseName + '-' + n + '.' + ext : baseName + '-' + n + '.' + ext;
+      n++;
+    } while (window._exportUsedPaths[candidate]);
+    return candidate;
+  }
+
+  function askDuplicateChoice(path) {
+    return new Promise(function(resolve) {
+      var modal = document.getElementById('duplicateFileModal');
+      var nameEl = document.getElementById('duplicateFileName');
+      var replaceBtn = document.getElementById('dupReplaceBtn');
+      var keepBtn = document.getElementById('dupKeepBtn');
+      nameEl.textContent = path;
+      modal.classList.remove('hidden');
+      function cleanup() {
+        modal.classList.add('hidden');
+        replaceBtn.removeEventListener('click', onReplace);
+        keepBtn.removeEventListener('click', onKeep);
+      }
+      function onReplace() { cleanup(); resolve('replace'); }
+      function onKeep() { cleanup(); resolve('keep'); }
+      replaceBtn.addEventListener('click', onReplace);
+      keepBtn.addEventListener('click', onKeep);
+    });
+  }
 
   // ── IMAGE COMPRESSION ─────────────────────────────────────────────────────
   // Compress PNG bytes to JPEG below targetKB using canvas quality stepping

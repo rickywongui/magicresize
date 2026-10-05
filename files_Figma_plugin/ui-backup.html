@@ -355,20 +355,6 @@
         </div>
 
         <div class="size-form" style="margin-bottom:10px"
-          id="groupByTemplateRow">
-          <label
-            style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
-            <input type="checkbox" id="groupByTemplate"
-              style="width:14px;height:14px" />
-            Group by template
-          </label>
-          <div
-            style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
-            Adds a template-level subfolder, e.g. <code>fr/Ad4/…</code>
-          </div>
-        </div>
-
-        <div class="size-form" style="margin-bottom:10px"
           id="groupByRetailerRow">
           <label
             style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text)">
@@ -378,8 +364,9 @@
           </label>
           <div
             style="font-size:10px;color:var(--muted);margin-top:3px;padding-left:22px">
-            Nests by retailer first, then template, e.g.
-            <code>fr/Babywalzde/Ad4/…</code>
+            Adds a retailer-level subfolder, e.g.
+            <code>fr/Ad4/Babywalzde/…</code>
+            instead of <code>fr/Ad4/…</code>
           </div>
         </div>
 
@@ -551,14 +538,7 @@
     recheckTimer = setInterval(function () {
       if (!activeLicenseKey) return;
       verifyLicense(activeLicenseKey).then(function (result) {
-        if (result.valid) {
-          // Push the freshly-issued token into code.js so its cached copy doesn't go
-          // stale once the previous token's exp passes — code.js only trusts a token
-          // it can verify itself, not a bare boolean, so this refresh is required for
-          // the session to keep working past the token's lifetime.
-          reportLicenseStatus(true, result.token);
-          return;
-        }
+        if (result.valid) return; // still fine
         if (result.reason === 'network_error') return; // don't punish a transient connectivity blip
         // Genuinely no longer valid (revoked, expired, moved to another device, etc.) —
         // lock the UI back down AND make sure the backend actually knows, so hiding this
@@ -574,12 +554,12 @@
     }, RECHECK_INTERVAL_SECONDS * 1000);
   }
 
-  function reportLicenseStatus(valid, token) {
+  function reportLicenseStatus(valid) {
     if (appContent) {
       if (valid) appContent.classList.remove('app-locked');
       else appContent.classList.add('app-locked');
     }
-    par.postMessage({ pluginMessage: { type: 'LICENSE_STATUS', valid: valid, token: token || null } }, '*');
+    par.postMessage({ pluginMessage: { type: 'LICENSE_STATUS', valid: valid } }, '*');
   }
 
   function setLicenseStatus(text, cls) {
@@ -596,20 +576,20 @@
       .catch(function () { return { valid: false, reason: 'network_error' }; });
   }
 
-  function unlockUI(key, token) {
+  function unlockUI(key) {
     licenseOverlay.className = 'license-overlay hidden';
     activeLicenseKey = key;
     par.postMessage({ pluginMessage: { type: 'SAVE_LICENSE_KEY', key: key } }, '*');
     startHeartbeat();
     startLicenseRecheck();
-    reportLicenseStatus(true, token);
+    reportLicenseStatus(true);
   }
 
   function tryStoredKey(savedKey) {
     setLicenseStatus('Checking license…', 'checking');
     verifyLicense(savedKey).then(function (result) {
       if (result.valid) {
-        unlockUI(savedKey, result.token);
+        unlockUI(savedKey);
       } else if (result.reason === 'device_limit_reached') {
         setLicenseStatus('This license is now active on a different machine. Contact Trung for your own license key.', 'error');
         reportLicenseStatus(false);
@@ -630,7 +610,7 @@
     verifyLicense(key).then(function (result) {
       licenseSubmit.disabled = false;
       if (result.valid) {
-        unlockUI(key, result.token);
+        unlockUI(key);
       } else if (result.reason === 'device_limit_reached') {
         setLicenseStatus('This license is already active on another machine. Contact Trung for your own license key.', 'error');
         reportLicenseStatus(false);
@@ -875,22 +855,6 @@
     exportLangSection.style.display = 'none';
     updateExportInfo();
   });
-
-  // "Group by template" and "Group by retailer" control two different, mutually exclusive
-  // folder nesting orders (template/retailer vs retailer/template) — checking one always
-  // unchecks the other, since combining them isn't a supported structure.
-  (function () {
-    var groupByTemplateChk = document.getElementById('groupByTemplate');
-    var groupByRetailerChk = document.getElementById('groupByRetailer');
-    if (groupByTemplateChk && groupByRetailerChk) {
-      groupByTemplateChk.addEventListener('change', function () {
-        if (groupByTemplateChk.checked) groupByRetailerChk.checked = false;
-      });
-      groupByRetailerChk.addEventListener('change', function () {
-        if (groupByRetailerChk.checked) groupByTemplateChk.checked = false;
-      });
-    }
-  })();
   document.getElementById('exportAll').addEventListener('change', function() {
     exportLangSection.style.display = 'block';
     updateExportInfo();
@@ -1105,8 +1069,6 @@
     exportLog.style.display = 'none';
     var exportScaleEl = document.getElementById('exportScale');
     if (exportScaleEl) exportScaleEl.selectedIndex = 0;
-    var groupByTemplateEl = document.getElementById('groupByTemplate');
-    if (groupByTemplateEl) groupByTemplateEl.checked = false;
     var groupByRetailerEl = document.getElementById('groupByRetailer');
     if (groupByRetailerEl) groupByRetailerEl.checked = false;
 
@@ -1698,9 +1660,7 @@
       var scope  = document.querySelector('input[name=exportScope]:checked').value;
       var format = document.querySelector('input[name=exportFormat]:checked').value;
       var scale  = parseFloat(document.getElementById('exportScale').value);
-      var groupByTemplateChk = document.getElementById('groupByTemplate');
       var groupByRetailerChk = document.getElementById('groupByRetailer');
-      var groupByTemplate = !!(groupByTemplateChk && groupByTemplateChk.checked);
       var groupByRetailer = !!(groupByRetailerChk && groupByRetailerChk.checked);
       var exportLangs = scope === 'all' ? getSelectedExportLangs() : [];
       exportLog.innerHTML = ''; exportLog.style.display = 'block';
@@ -1711,11 +1671,11 @@
       window._fileQueueBusy = false;
       window._exportUsedPaths = {};
       window._exportDoneMsg = null;
-      addExportLog('Starting export — scope=' + scope + ' format=' + format + ' scale=' + scale + (groupByTemplate ? ' groupByTemplate=true' : '') + (groupByRetailer ? ' groupByRetailer=true' : '') + (exportLangs.length ? ' langs=' + exportLangs.join(',') : ''));
+      addExportLog('Starting export — scope=' + scope + ' format=' + format + ' scale=' + scale + (groupByRetailer ? ' groupByRetailer=true' : '') + (exportLangs.length ? ' langs=' + exportLangs.join(',') : ''));
       btnLabel.textContent = 'Exporting…';
       createBtn.disabled = true;
       showStopBtn();
-      par.postMessage({ pluginMessage: { type: 'EXPORT_BANNERS', scope: scope, format: format, scale: scale, languages: exportLangs, groupByTemplate: groupByTemplate, groupByRetailer: groupByRetailer } }, '*');
+      par.postMessage({ pluginMessage: { type: 'EXPORT_BANNERS', scope: scope, format: format, scale: scale, languages: exportLangs, groupByRetailer: groupByRetailer } }, '*');
     } else if (mode === 'translate') {
       var langs = getSelectedLanguages();
       if (!langs.length || !translationData) return;

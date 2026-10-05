@@ -3,22 +3,6 @@ function nodeExists(node) {
     try { var _ = node.id; return true; } catch (e) { return false; }
 }
 
-
-// Normal text layers AND "text on a path" layers (e.g. text typed along a circle)
-function isTextLikeNode(n) {
-    return n && (n.type === "TEXT" || n.type === "TEXT_PATH");
-}
-
-// Approximate visual width of a string in "Latin character" units.
-// CJK / Hangul / full-width characters are roughly twice as wide as Latin ones,
-// so counting raw characters would make JA/ZH/KO look "shorter" than EN and
-// wrongly scale the font UP.
-function visualTextLength(str) {
-    var s = String(str || "").trim();
-    var wide = (s.match(/[\u1100-\u115F\u2E80-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6]/g) || []).length;
-    return (s.length - wide) + wide * 2;
-}
-
 // Check if a node directly contains a Union/Boolean/Vector child
 // Such parents must stay FIXED width — never FILL
 function hasUnionChild(node) {
@@ -557,11 +541,11 @@ function calcNewValues(map, rx, ry, ratio) {
         n.strokeWeight = d.strokeWeight !== null ? Math.max(0.01, d.strokeWeight * ratio) : null;
         // Text
         n.fontSize = d.fontSize !== null
-            ? Math.max(Math.min(10, d.fontSize), Math.round(d.fontSize * textRatio))
+            ? Math.max(10, Math.round(d.fontSize * textRatio))
             : null;
 
         n.lineHeight = d.lineHeight !== null
-            ? Math.max(Math.min(14, d.lineHeight), Math.round(d.lineHeight * textRatio))
+            ? Math.max(14, Math.round(d.lineHeight * textRatio))
             : null;
 
         n.letterSpacing = d.letterSpacing !== null
@@ -2141,7 +2125,7 @@ figma.ui.onmessage = async function (msg) {
         }
 
         for (var sn = 0; sn < sourceNodes.length; sn++) {
-            var textNodes = sourceNodes[sn].findAll(isTextLikeNode);
+            var textNodes = sourceNodes[sn].findAll(function (n) { return n.type === "TEXT"; });
             for (var i = 0; i < textNodes.length; i++) {
                 var txt = textNodes[i].characters.trim();
                 if (!txt || seenTexts[txt]) continue; // skip empty or duplicate text
@@ -2157,7 +2141,7 @@ figma.ui.onmessage = async function (msg) {
 
     if (msg.type === "GET_SELECTED_TEXT_LAYER") {
         var sel = figma.currentPage.selection;
-        if (sel.length === 1 && isTextLikeNode(sel[0])) {
+        if (sel.length === 1 && sel[0].type === "TEXT") {
             figma.ui.postMessage({ type: "TEXT_LAYER_SELECTED", id: sel[0].id, name: sel[0].name });
         } else {
             figma.ui.postMessage({ type: "NO_TEXT_LAYER" });
@@ -2760,9 +2744,6 @@ figma.ui.onmessage = async function (msg) {
                 console.log("  Frame [" + cloned.name + "] cloned");
 
                 // Replace text
-                // Layers whose text was replaced in THIS banner, keyed by node id. Their font
-                // sizes are applied after all mappings are done (see "CONSISTENT FONT SIZES").
-                var pendingTextScales = {};
                 for (var colName in mappings) {
                     var mapping = mappings[colName];
                     var translatedText = langTranslations[colName];
@@ -2771,7 +2752,7 @@ figma.ui.onmessage = async function (msg) {
                         continue;
                     }
 
-                    var textNodes = cloned.findAll(isTextLikeNode);
+                    var textNodes = cloned.findAll(function (n) { return n.type === "TEXT"; });
                     var sourceNode = null;
                     try { sourceNode = figma.getNodeById(mapping.id); } catch (e) { }
                     var targetName = sourceNode ? sourceNode.name : mapping.name;
@@ -2802,8 +2783,6 @@ figma.ui.onmessage = async function (msg) {
 
                                 // Snapshot original character styles (font, size, lineHeight) before replacing
                                 var origLen = textNode.characters.length;
-                                var originalCharacters = textNode.characters; // snapshot for visual-length comparison
-                                var origNodeHeight = textNode.height;          // used to detect single-line text
                                 var origLineHeight = textNode.lineHeight; // snapshot node-level lineHeight
                                 var charStyles = [];
                                 for (var si = 0; si < origLen; si++) {
@@ -2817,40 +2796,40 @@ figma.ui.onmessage = async function (msg) {
                                 textNode.characters = translatedText;
                                 var newLen = textNode.characters.length;
 
-                                // Calculate font scale from the change in VISUAL text length
-                                // (CJK characters count ~2x, see visualTextLength).
-                                //  - Single-line text (text on a path, auto-width, or one line
-                                //    tall): width grows with chars × fontSize → linear ratio.
-                                //  - Wrapping text in a fixed-width box: area grows with
-                                //    chars × fontSize² → square root of the ratio.
-                                // Longer translation → smaller font. Never enlarged beyond the
-                                // original design (max 100%), never below 70%.
-                                var origVis = visualTextLength(originalCharacters);
-                                var newVis = visualTextLength(translatedText);
-                                var lengthRatio = (origVis > 0 && newVis > 0) ? origVis / newVis : 1;
-                                var maxOrigSize = 0;
-                                for (var msi = 0; msi < charStyles.length; msi++) {
-                                    if (typeof charStyles[msi].size === 'number' && charStyles[msi].size > maxOrigSize) maxOrigSize = charStyles[msi].size;
-                                }
-                                var isSingleLine = textNode.type === "TEXT_PATH" ||
-                                    textNode.textAutoResize === "WIDTH_AND_HEIGHT" ||
-                                    (maxOrigSize > 0 && origNodeHeight < maxOrigSize * 1.8);
-                                var fontScale = isSingleLine ? lengthRatio : Math.sqrt(lengthRatio);
-                                fontScale = Math.max(0.70, Math.min(1.0, fontScale));
-                                console.log("    font scale: " + origVis + " EN width → " + newVis + " translated width, " + (isSingleLine ? "single-line (linear)" : "wrapping (sqrt)") + ", scale=" + fontScale.toFixed(2));
+                                // Calculate font scale ratio based on text length change
+                                // Longer translation → smaller font, shorter → bigger font
+                                // Capped between 70% and 130% of original size
+                                var lengthRatio = origLen > 0 ? origLen / newLen : 1;
+                                var fontScale = Math.max(0.70, Math.min(1.30, lengthRatio));
+                                console.log("    font scale: " + origLen + " EN chars → " + newLen + " translated chars, scale=" + fontScale.toFixed(2));
 
-                                // Don't apply the size yet — queue this layer so every layer in
-                                // this banner that shared the SAME original style (e.g. all three
-                                // feature headings) can be given ONE shared scale afterwards.
-                                // Scaling each layer independently is what made headings that were
-                                // identical in EN end up at different sizes after translation.
-                                var firstFont = (charStyles.length > 0 && charStyles[0].font !== figma.mixed) ? charStyles[0].font : null;
-                                var styleGroupKey = (firstFont ? firstFont.family + "::" + firstFont.style : "?") + "::" + Math.round(maxOrigSize);
-                                pendingTextScales[textNode.id] = {
-                                    node: textNode, charStyles: charStyles, origLen: origLen, newLen: newLen,
-                                    origLineHeight: origLineHeight, fontScale: fontScale,
-                                    groupKey: styleGroupKey, targetName: targetName
-                                };
+                                // Reapply character styles with scaled font size
+                                for (var ni = 0; ni < newLen; ni++) {
+                                    var origIdx = Math.min(Math.round(ni / newLen * origLen), origLen - 1);
+                                    var style = charStyles[origIdx];
+                                    try {
+                                        if (style && style.font !== figma.mixed) {
+                                            await figma.loadFontAsync(style.font);
+                                            textNode.setRangeFontName(ni, ni + 1, style.font);
+                                        }
+                                        if (style && typeof style.size === 'number') {
+                                            var scaledSize = Math.round(style.size * fontScale);
+                                            scaledSize = Math.max(10, scaledSize);
+                                            textNode.setRangeFontSize(ni, ni + 1, scaledSize);
+                                        }
+                                    } catch (e) { }
+                                }
+
+                                // Scale line-height by same ratio (only for PIXELS unit)
+                                try {
+                                    var lh = origLineHeight;
+                                    if (lh && lh !== figma.mixed && lh.unit === 'PIXELS') {
+                                        var scaledLH = Math.round(lh.value * fontScale);
+                                        scaledLH = Math.max(14, scaledLH);
+                                        textNode.lineHeight = { unit: 'PIXELS', value: scaledLH };
+                                        console.log("    lineHeight: " + lh.value + " → " + scaledLH);
+                                    }
+                                } catch (e) { }
 
                                 console.log("    ✓ Set [" + targetName + "] = " + translatedText.substring(0, 30));
                                 found = true;
@@ -2859,52 +2838,6 @@ figma.ui.onmessage = async function (msg) {
                         }
                     }
                     if (!found) console.log("    ✗ Layer not found: " + targetName);
-                }
-
-                // ── CONSISTENT FONT SIZES ─────────────────────────────────────────────
-                // Layers that had the same font family, style and size in EN are treated as
-                // one "style group" (e.g. all headings, or all sub-lines). Every layer in a
-                // group gets the SMALLEST scale any of them needed, so they stay identical to
-                // each other — the longest translation decides the size for the whole group.
-                var groupMinScale = {};
-                for (var pid in pendingTextScales) {
-                    var pe = pendingTextScales[pid];
-                    if (groupMinScale[pe.groupKey] === undefined || pe.fontScale < groupMinScale[pe.groupKey]) {
-                        groupMinScale[pe.groupKey] = pe.fontScale;
-                    }
-                }
-                for (var pid2 in pendingTextScales) {
-                    var pt = pendingTextScales[pid2];
-                    var tNode = pt.node;
-                    var groupScale = groupMinScale[pt.groupKey];
-                    if (groupScale !== pt.fontScale) {
-                        console.log("    [consistent] [" + pt.targetName + "] scale " + pt.fontScale.toFixed(2) + " → " + groupScale.toFixed(2) + " (matched to its style group)");
-                    }
-                    // Reapply character styles with the group's shared scale
-                    for (var ni = 0; ni < pt.newLen; ni++) {
-                        var origIdx = Math.min(Math.round(ni / pt.newLen * pt.origLen), pt.origLen - 1);
-                        var style = pt.charStyles[origIdx];
-                        try {
-                            if (style && style.font !== figma.mixed) {
-                                await figma.loadFontAsync(style.font);
-                                tNode.setRangeFontName(ni, ni + 1, style.font);
-                            }
-                            if (style && typeof style.size === 'number') {
-                                var scaledSize = Math.round(style.size * groupScale);
-                                scaledSize = Math.max(Math.min(10, style.size), scaledSize); // floor never enlarges already-small text
-                                tNode.setRangeFontSize(ni, ni + 1, scaledSize);
-                            }
-                        } catch (e) { }
-                    }
-                    // Scale line-height by the same shared scale (only for PIXELS unit)
-                    try {
-                        var lh = pt.origLineHeight;
-                        if (lh && lh !== figma.mixed && lh.unit === 'PIXELS') {
-                            var scaledLH = Math.round(lh.value * groupScale);
-                            scaledLH = Math.max(Math.min(14, lh.value), scaledLH); // floor never enlarges an already-tight line height
-                            tNode.lineHeight = { unit: 'PIXELS', value: scaledLH };
-                        }
-                    } catch (e) { }
                 }
 
                 // ── POST-TRANSLATION SIZING RULES ──────────────────────────────────────
